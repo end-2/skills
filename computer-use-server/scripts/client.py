@@ -13,6 +13,7 @@ import urllib.request
 import uuid
 
 from platform_support import default_token_path, private_file, lock_file
+from status_view import filter_status
 
 
 def bounded_number(minimum, maximum, *, integer=False):
@@ -106,7 +107,11 @@ def main():
     sub.add_parser("health")
     create = sub.add_parser("open")
     create.add_argument("--agent-id", required=True)
-    sub.add_parser("status")
+    status = sub.add_parser("status")
+    status.add_argument("--match", help="Filter titles/descriptions by literal text, ignoring case")
+    status.add_argument("--role", help="Filter by exact accessibility role")
+    status.add_argument("--actionable", action="store_true", help="Show nodes with actions or settable attributes unless disabled")
+    status.add_argument("--limit", type=bounded_number(1, 1200, integer=True), help="Limit matching nodes; ancestor nodes are retained")
     for name in ("acquire", "renew"):
         sub.add_parser(name).add_argument("--ttl", type=float, default=30)
     enqueue = sub.add_parser("enqueue", help="Queue a resumable task for a fair scheduler turn")
@@ -115,6 +120,7 @@ def main():
     enqueue.add_argument("--quantum-ms", type=bounded_number(100, 10000, integer=True), default=1000)
     enqueue.add_argument("--ttl", type=bounded_number(1, 120), default=30)
     enqueue.add_argument("--queue-timeout", type=bounded_number(1, 300), default=60)
+    sub.add_parser("retry-enqueue", help="Resend the exact last enqueue with its original task ID and options")
     turn = sub.add_parser("turn", help="Read the current task state and recover its lease")
     turn.add_argument("--wait-seconds", type=bounded_number(0, 30), default=0)
     yielding = sub.add_parser("yield", help="Finish the current task, or requeue at a safe boundary")
@@ -168,13 +174,14 @@ def main():
                     raise ValueError("Open a session for this endpoint first")
                 op = args.command
                 if session.get("pending_unknown") and op in {
-                        "act", "yield", "retry-yield", "release", "enqueue", "acquire", "close"}:
+                        "act", "yield", "retry-yield", "release", "enqueue", "retry-enqueue", "acquire", "close"}:
                     raise ValueError("Last action has an unknown outcome; use retry with its original payload, then inspect status before changing ownership")
                 if session.get("pending_yield") and op in {
-                        "act", "yield", "release", "enqueue", "acquire", "renew", "close"}:
+                        "act", "yield", "release", "enqueue", "retry-enqueue", "acquire", "renew", "close"}:
                     raise ValueError("Last yield has an unknown outcome; use turn to recover, or retry-yield with its original payload")
                 payload = {}
                 previous_task = {key: session[key] for key in ("task_id", "task_state") if key in session}
+                previous_enqueue = session.get("last_enqueue")
                 if op in ("acquire", "renew"):
                     payload["ttl"] = args.ttl
                 if op in ("renew", "release"):
@@ -191,14 +198,25 @@ def main():
                     if not session.get("last_action"):
                         raise ValueError("No action is available to retry")
                     payload, op = session["last_action"], "act"
-                elif op == "enqueue":
-                    if (session.get("task_id") != args.task_id
+                elif op in {"enqueue", "retry-enqueue"}:
+                    if op == "retry-enqueue":
+                        if not session.get("last_enqueue"):
+                            raise ValueError("No enqueue is available to retry; use enqueue with the original task ID and options")
+                        payload, op = dict(session["last_enqueue"]), "enqueue"
+                    else:
+                        payload = {"task_id": args.task_id, "intent": args.intent, "quantum_ms": args.quantum_ms,
+                                   "ttl": args.ttl, "queue_timeout": args.queue_timeout}
+                    if (session.get("task_id") != payload["task_id"]
                             and session.get("task_state") in {"queued", "running", "unknown"}):
-                        raise ValueError("Finish or cancel the current task before enqueueing a different task; use turn to refresh its state")
-                    payload = {"task_id": args.task_id, "intent": args.intent, "quantum_ms": args.quantum_ms,
-                               "ttl": args.ttl, "queue_timeout": args.queue_timeout}
-                    session["task_id"], session["task_state"] = args.task_id, "unknown"
-                    save()  # A lost enqueue reply can be recovered using turn.
+                        raise ValueError("Finish or cancel the current task before enqueueing a different task; use turn to refresh it, or retry-enqueue to recover an unknown enqueue")
+                    if (session.get("task_state") == "unknown" and previous_enqueue
+                            and previous_enqueue != payload):
+                        raise ValueError("Last enqueue has an unknown outcome; use retry-enqueue with its original task ID and options")
+                    session["last_enqueue"] = dict(payload)
+                    session["task_id"], session["task_state"] = payload["task_id"], "unknown"
+                    # The request may never arrive, so turn alone cannot always
+                    # recover it. Preserve the exact idempotent enqueue payload.
+                    save()
                 elif op in {"turn", "yield", "cancel"}:
                     if not session.get("task_id"):
                         raise ValueError("Enqueue a task before using scheduler commands")
@@ -264,6 +282,8 @@ def main():
                     for key in ("task_id", "task_state"):
                         session.pop(key, None)
                     session.update(previous_task)
+                    if previous_enqueue and previous_enqueue != payload:
+                        session["last_enqueue"] = previous_enqueue
                 elif op == "yield" and payload["task_id"] == session.get("task_id"):
                     # A definite rejection (including requeue capacity) leaves
                     # the current lease intact. Auth/server errors may be a lost
@@ -271,6 +291,9 @@ def main():
                     if reply.get("error", {}).get("code") not in {"invalid_session", "unauthorized", "forbidden", "backend_unavailable"}:
                         session["pending_yield"] = False
                 save()
+    if args.command == "status" and reply.get("ok"):
+        reply = filter_status(reply, match=args.match, role=args.role,
+                              actionable=args.actionable, limit=args.limit)
     print(json.dumps(without_credentials(reply), ensure_ascii=False, indent=2))
     return 0 if reply.get("ok") else 1
 

@@ -19,6 +19,8 @@ Success responses have the form `{"ok":true,"result":{...}}`; errors use `{"ok":
 | `/v1/sessions/{id}/act` | POST | See below | accepted, result, revision, request_id, verification_required |
 | `/v1/sessions/{id}/close` | POST | `{}` | closed; also removes the session's lease, queued tasks, and history |
 
+`status` requires an authenticated session, not a lease. It can inspect the UI or investigate an uncertain outcome without entering the task queue. Before a scheduled action, wait for a running turn and take a fresh snapshot. Queued agents should poll `turn` rather than repeatedly calling `status`, because UI reads share the backend mutex.
+
 ```json
 {
   "request_id": "unique-request-uuid",
@@ -42,7 +44,7 @@ The scheduler runs in the OS-independent broker. The queue stores task intent on
 | ttl | 30 | 1–120 seconds. Lease lifetime for the turn |
 | queue_timeout | 60 | 1–300 seconds. Maximum time waiting in the queue |
 
-Each session may have one queued or running task. Repeating enqueue with the same task_id and options returns the current task status. Different options produce `request_conflict`. Enqueuing a completed ID does not restart it; use a new ID for new work.
+Each session may have one queued or running task. Repeating enqueue with the same task_id and options returns the current task status. Different options produce `request_conflict`. Enqueuing a completed ID does not restart it; use a new ID for new work. If the enqueue response is lost, CLI `retry-enqueue` resends the saved task_id and options; then use `turn` to check the current state. A `task_not_found` from turn alone does not prove a delayed enqueue failed. Do not discard the pending request or create a replacement task on that basis.
 
 A task status object's `state` is one of `queued`, `running`, `completed`, `cancelled`, or `expired`. Common fields are task_id, intent, quantum_ms, turns, waiting_count, and queue_position. Queued tasks also include queue_expires_in. Running tasks include these **top-level fields**: lease_token, generation, expires_in, slice_elapsed_ms, quantum_exhausted, and yield_due. Completed, cancelled, and expired are terminal states. In contrast, `state` in a `status` response is the UI state object. That response's lease also includes yield information for the session's scheduled turn.
 
@@ -64,6 +66,10 @@ Use cancel for queued tasks and yield to finish running tasks. Manual release of
   "applications": [{"pid": 123, "name": "Example", "bundle_id": "com.example.app"}],
   "roots": ["123/0"],
   "nodes": [{
+    "id": "123/0", "pid": 123, "role": "AXApplication", "title": "Example",
+    "description": null, "value": null, "enabled": null, "focused": null,
+    "actions": [], "settable": [], "children": ["123/0.0"], "secure": false
+  }, {
     "id": "123/0.0", "pid": 123, "role": "AXButton", "title": "Apply",
     "description": null, "value": null, "enabled": true, "focused": false,
     "actions": ["AXPress"], "settable": [], "children": [], "secure": false
@@ -78,6 +84,36 @@ This example shows the macOS schema; its values are not actual node references. 
 Windows returns `platform: windows` and `capabilities.scope: foreground_window`; nodes include runtime_id and toggle/selection/expand state. Linux returns `platform: linux`, `scope: active_window`, `foreground_status`, and per-application `can_activate`. If the ACTIVE window is missing or ambiguous, frontmost_app=null and mutation capabilities are disabled. Linux's application list contains apps exposed by AT-SPI; Windows lists apps with visible top-level windows.
 
 String title/description/value fields display at most 4,096 characters. Clipping sets both the node's `text_truncated` and the overall `truncated` to true. `title_hash`, `description_hash`, and `value_hash` contain SHA-256 hashes of the full original strings, so changes confined to an omitted suffix still invalidate state verification. A hash cannot reveal omitted text; do not replace an entire long field whose full contents are unknown. Secure fields have both value and value_hash set to null.
+
+## CLI status projection
+
+The CLI can reduce the displayed tree with `status --match TEXT --role ROLE --actionable --limit N`. All options are optional and combine with AND. They are **CLI output options**, not HTTP fields: the status request body remains `{}`, and the backend still observes and validates the complete snapshot. With no filters, output is unchanged.
+
+| Option | Selection rule |
+| --- | --- |
+| `--match TEXT` | Literal, case-insensitive substring match using Unicode casefold in the exposed title or description; does not search value |
+| `--role ROLE` | Exact native role string from an observation, such as AXButton; names differ across OSes |
+| `--actionable` | enabled is not false, and actions or settable is nonempty; unknown enabled state is retained |
+| `--limit N` | Return at most N matching nodes in source order, from 1 to 1,200; required ancestor context does not count toward the limit |
+
+The output contains selected matches and their ancestors. Context ancestors may not satisfy the filters. Children and roots contain only retained references so the projected tree can still be traversed. `state.truncated` is true if the source was truncated or any source nodes were omitted; a zero-match view does not prove that the target is absent from the application. Filtering cannot recover text or nodes omitted by the backend.
+
+The CLI adds `result.view` to describe the projection:
+
+| Field | Meaning |
+| --- | --- |
+| filtered | true when CLI projection was requested |
+| match, role, actionable_only, limit | Applied CLI options; unset text/limit options are null |
+| total_nodes | Nodes in the source snapshot |
+| matching_nodes | Nodes matching all predicates before the limit |
+| returned_matches | Matching nodes selected within the limit |
+| context_nodes | Additional ancestor nodes retained for context |
+| returned_nodes | All retained nodes, including context |
+| omitted_nodes | Source nodes excluded from this view |
+| source_truncated | Original backend truncated flag |
+| matched_node_ids | IDs of selected matches; distinguishes targets from context ancestors |
+
+The original snapshot_id and complete-state fingerprint remain in use for actions. A change to an omitted node can still cause `stale_snapshot`. Output projection reduces reading cost; it does not change action capabilities, ownership, or validation scope. See the [operations examples](operations.md#focused-status-output).
 
 ## Supported actions
 

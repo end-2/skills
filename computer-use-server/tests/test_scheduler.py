@@ -220,6 +220,21 @@ class SchedulerTests(unittest.TestCase):
         self.assertGreater(fresh["revision"], first["revision"])
         self.assertTrue(self.press(self.a, a2, fresh, "fresh-turn")["accepted"])
 
+    def test_status_crossing_lease_handoff_returns_usable_snapshot_at_new_revision(self):
+        self.call(self.a, "acquire", ttl=1)
+        self.assertEqual(self.enqueue(self.b, "b")["state"], "queued")
+        self.backend.on_snapshot = lambda: self.clock.advance(1)
+        observed = self.call(self.b, "status")
+        self.backend.on_snapshot = None
+        self.assertEqual(observed["lease"]["owner_session_id"], self.b["session_id"])
+        self.assertEqual(observed["lease"]["task_id"], "b")
+        turn = self.turn(self.b, "b")
+        self.assertEqual(turn["state"], "running")
+        unchanged = self.call(self.b, "status")
+        self.assertEqual(unchanged["revision"], observed["revision"])
+        self.assertTrue(self.press(self.b, turn, observed, "after-status-handoff")["accepted"])
+        self.assertEqual(len(self.backend.actions), 1)
+
     def test_cancel_only_queued_work_and_terminal_cancel_is_idempotent(self):
         a = self.enqueue(self.a, "a")
         self.enqueue(self.b, "b")
@@ -289,6 +304,21 @@ class SchedulerTests(unittest.TestCase):
         for requeue in (None, 0, "true"):
             self.reject("invalid_request", self.a, "yield", task_id="a", lease_token=turn["lease_token"], requeue=requeue)
         self.reject("invalid_request", self.a, "yield", task_id="a", lease_token=turn["lease_token"])
+
+    def test_large_json_integer_options_return_input_errors_without_mutating_scheduler(self):
+        for field in ("ttl", "quantum_ms", "queue_timeout"):
+            with self.subTest(field=field):
+                payload = {"task_id": "a", "intent": "Complete unit", field: 10 ** 1000}
+                error = self.reject("invalid_request", self.a, "enqueue", **payload)
+                self.assertEqual(error.status, 400)
+                self.reject("task_not_found", self.a, "turn", task_id="a")
+        acquired = self.call(self.a, "acquire")
+        error = self.reject("invalid_request", self.b, "acquire", ttl=10 ** 1000)
+        self.assertEqual(error.status, 400)
+        error = self.reject("invalid_request", self.a, "renew", lease_token=acquired["lease_token"], ttl=10 ** 1000)
+        self.assertEqual(error.status, 400)
+        self.call(self.a, "release", lease_token=acquired["lease_token"])
+        self.assertEqual(self.enqueue(self.b, "b")["state"], "running")
 
 
 class RecordingFormBackend(MockBackend):

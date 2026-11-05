@@ -142,6 +142,65 @@ class ClientRecoveryTests(unittest.TestCase):
         self.cli("close")
         self.cli("close", session_path=other)
 
+    def test_enqueue_loss_before_or_after_dispatch_recovers_exactly_once(self):
+        original_request = client.request
+        for dispatched in (False, True):
+            with self.subTest(dispatched=dispatched):
+                self.session_path = Path(self.directory.name) / f"lost-enqueue-{dispatched}.json"
+                self.cli("open", "--agent-id", f"enqueue-recovery-{dispatched}")
+                arguments = ["enqueue", "--task-id", "recover-task", "--intent", "Edit a message",
+                             "--quantum-ms", "900", "--ttl", "12", "--queue-timeout", "45"]
+                argv = ["client.py", "--endpoint", f"http://127.0.0.1:{self.httpd.server_port}",
+                        "--token-file", str(self.token_path), "--session-file", str(self.session_path), *arguments]
+                accepted = []
+
+                def lose_response(*args, **kwargs):
+                    self.assertEqual(self.session()["last_enqueue"], args[3])
+                    if dispatched:
+                        accepted.append(original_request(*args, **kwargs))
+                    raise urllib.error.URLError("Injected transport loss")
+
+                with patch.object(sys, "argv", argv), patch.object(client, "request", side_effect=lose_response) as request:
+                    with self.assertRaises(urllib.error.URLError):
+                        client.main()
+                self.assertEqual(request.call_count, 1)
+                self.assertEqual(self.session()["task_state"], "unknown")
+                self.assertEqual(self.session()["last_enqueue"], {
+                    "task_id": "recover-task", "intent": "Edit a message", "quantum_ms": 900,
+                    "ttl": 12, "queue_timeout": 45,
+                })
+                if not dispatched:
+                    for operation in ("turn", "cancel"):
+                        self.assertEqual(self.cli(operation, expected_exit=1)["error"]["code"], "task_not_found")
+                    self.assertEqual(self.session()["task_state"], "unknown")
+                recovered = self.cli("retry-enqueue")["result"]
+                self.assertEqual(recovered["state"], "running")
+                if dispatched:
+                    self.assertEqual(recovered["generation"], accepted[0]["result"]["generation"])
+                self.assertEqual(self.cli("retry-enqueue")["result"]["generation"], recovered["generation"])
+                self.assertEqual(self.session()["task_state"], "running")
+                self.cli("yield")
+                self.assertEqual(self.cli("retry-enqueue")["result"]["state"], "completed")
+                self.assertNotIn("lease_token", self.session())
+                self.cli("close")
+
+    def test_filtered_status_preserves_full_snapshot_validation(self):
+        self.cli("open", "--agent-id", "filtered-status")
+        self.cli("acquire")
+        full = self.cli("status")["result"]
+        self.assertEqual(full["state"], self.backend.snapshot())
+        self.assertNotIn("view", full)
+        filtered = self.cli("status", "--match", "aPpLy", "--role", "AXButton",
+                            "--actionable", "--limit", "1")["result"]
+        self.assertEqual(filtered["view"]["matched_node_ids"], ["submit"])
+        self.assertEqual([node["id"] for node in filtered["state"]["nodes"]], ["window", "submit"])
+        self.assertEqual(self.session()["snapshot_id"], filtered["snapshot_id"])
+        self.backend.value = "An unshown control changed"
+        action = json.dumps({"kind": "perform", "node_id": "submit", "action": "AXPress"})
+        rejected = self.cli("act", "--action", action, expected_exit=1)
+        self.assertEqual(rejected["error"]["code"], "stale_snapshot")
+        self.assertEqual(self.backend.presses, 0)
+
 
 class ClientSchedulerTests(unittest.TestCase):
     """Exercise CLI parsing and durable recovery against API response fixtures."""
@@ -220,12 +279,44 @@ class ClientSchedulerTests(unittest.TestCase):
                  ["enqueue", "--task-id", "a", "--intent", "x", "--ttl", "0"],
                  ["enqueue", "--task-id", "a", "--intent", "x", "--queue-timeout", "301"],
                  ["enqueue", "--task-id", "a" * 129, "--intent", "x"],
-                 ["enqueue", "--task-id", "a", "--intent", "x" * 513]]
+                 ["enqueue", "--task-id", "a", "--intent", "x" * 513],
+                 ["status", "--limit", "0"], ["status", "--limit", "1201"],
+                 ["status", "--limit", "1.5"], ["status", "--limit", "nan"]]
         for args in cases:
             with self.subTest(args=args), patch.object(sys, "argv", ["client.py", *args]), patch.object(client, "request") as request, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:
                 client.main()
             self.assertEqual(stopped.exception.code, 2)
             request.assert_not_called()
+
+    def test_status_filters_run_after_snapshot_is_saved_and_never_change_request(self):
+        full = self.ok({"snapshot_id": "full-observation", "revision": 7,
+                        "state": {"nodes": [], "roots": [], "truncated": False}})
+
+        def filtered(reply, **options):
+            self.assertEqual(self.session()["snapshot_id"], "full-observation")
+            self.assertEqual(reply, full)
+            self.assertEqual(options, {"match": "Message", "role": "AXTextField", "actionable": True, "limit": 1200})
+            return dict(reply, result=dict(reply["result"], view={"filtered": True}))
+
+        with patch.object(client, "filter_status", side_effect=filtered) as filtering:
+            reply, calls = self.invoke(["status", "--match", "Message", "--role", "AXTextField",
+                                        "--actionable", "--limit", "1200"], [full])
+        filtering.assert_called_once()
+        self.assertEqual(calls[0].args[3], {})
+        self.assertTrue(reply["result"]["view"]["filtered"])
+        self.assertEqual(self.session()["snapshot_id"], full["result"]["snapshot_id"])
+
+    def test_default_status_and_error_responses_are_unchanged(self):
+        full = self.ok({"snapshot_id": "full-observation", "revision": 7,
+                        "state": {"nodes": [], "roots": [], "truncated": False}})
+        reply, _ = self.invoke(["status"], [full])
+        self.assertEqual(reply, full)
+        failure = {"ok": False, "error": {"code": "backend_unavailable", "message": "Observation failed"}}
+        with patch.object(client, "filter_status") as filtering:
+            reply, _ = self.invoke(["status", "--match", "Message", "--limit", "1"], [failure], expected=1)
+        filtering.assert_not_called()
+        self.assertEqual(reply, failure)
+        self.assertEqual(self.session()["snapshot_id"], "full-observation")
 
     def test_queued_and_terminal_status_drop_old_lease_and_snapshot(self):
         for state in ("queued", "completed", "cancelled", "expired"):
@@ -322,7 +413,7 @@ class ClientSchedulerTests(unittest.TestCase):
         action = {"request_id": "request-old", "snapshot_id": "snapshot-old", "lease_token": "lease-secret-1",
                   "action": {"kind": "focus", "node_id": "input"}}
         self.amend(task_id="task-a", task_state="running", pending_unknown=True, last_action=action)
-        for arguments in (["yield"], ["release"], ["enqueue", "--task-id", "task-b", "--intent", "Next task"], ["close"]):
+        for arguments in (["yield"], ["release"], ["enqueue", "--task-id", "task-b", "--intent", "Next task"], ["retry-enqueue"], ["close"]):
             with self.subTest(arguments=arguments), self.assertRaisesRegex(ValueError, "Last action"):
                 self.invoke(arguments, [])
         _, calls = self.invoke(["retry"], [self.ok({"accepted": True, "request_id": "request-old"})])
@@ -338,6 +429,42 @@ class ClientSchedulerTests(unittest.TestCase):
         self.assertEqual(self.session()["task_state"], "unknown")
         self.invoke(["turn"], [self.ok(self.task())])
         self.assertEqual(self.session()["task_state"], "running")
+
+    def test_unknown_enqueue_preserves_original_options_until_explicit_recovery(self):
+        with self.assertRaises(urllib.error.URLError):
+            self.invoke(["enqueue", "--task-id", "task-a", "--intent", "Edit the form", "--quantum-ms", "700"],
+                        urllib.error.URLError("Request never arrived"))
+        saved = self.session()
+        for arguments in (["enqueue", "--task-id", "task-a", "--intent", "Changed intent"],
+                          ["enqueue", "--task-id", "task-b", "--intent", "Next task"]):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(ValueError, "retry-enqueue"):
+                self.invoke(arguments, [])
+            self.assertEqual(self.session(), saved)
+        _, calls = self.invoke(["retry-enqueue"], [self.ok(self.task())])
+        self.assertEqual(calls[0].args[3], saved["last_enqueue"])
+        self.assertTrue(calls[0].args[2].endswith("/enqueue"))
+        self.assertEqual(self.session()["task_state"], "running")
+
+    def test_retry_enqueue_cannot_replace_another_active_task_or_bypass_unknown_yield(self):
+        old = {"task_id": "task-old", "intent": "Earlier task", "quantum_ms": 1000, "ttl": 30, "queue_timeout": 60}
+        self.amend(task_id="task-a", task_state="running", last_enqueue=old, lease_token="lease-secret-2", lease_generation=2)
+        saved = self.session()
+        with self.assertRaisesRegex(ValueError, "different task"):
+            self.invoke(["retry-enqueue"], [])
+        self.assertEqual(self.session(), saved)
+        self.amend(pending_yield=True)
+        with self.assertRaisesRegex(ValueError, "Last yield"):
+            self.invoke(["retry-enqueue"], [])
+
+    def test_rejected_changed_enqueue_does_not_lose_original_recovery_payload(self):
+        old = {"task_id": "task-a", "intent": "Original intent", "quantum_ms": 1000, "ttl": 30, "queue_timeout": 60}
+        self.amend(task_id="task-a", task_state="running", last_enqueue=old,
+                   lease_token="lease-secret-1", lease_generation=1, snapshot_id="current")
+        self.invoke(["enqueue", "--task-id", "task-a", "--intent", "Changed intent"],
+                    [{"ok": False, "error": {"code": "request_conflict", "message": "Different options"}}], expected=1)
+        self.assertEqual(self.session()["last_enqueue"], old)
+        self.assertEqual(self.session()["task_state"], "running")
+        self.assertEqual(self.session()["snapshot_id"], "current")
 
     def test_rejected_requeue_preserves_lease_and_clears_pending_yield(self):
         self.amend(task_id="task-a", task_state="running", lease_token="lease-secret-1", lease_generation=1)

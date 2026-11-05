@@ -64,6 +64,8 @@ Enabling the built-in `Codex Computer Use` does not imply that this skill's inde
 
 After the user grants permission to the identified subject, restart the server and verify access with status. The server does not open permission prompts automatically. Source changes that alter the helper path may require another approval. Screen capture permission is not used.
 
+Use an unlocked, logged-in desktop for live UI validation. If status succeeds but reports `loginwindow` as the frontmost process, that alone is not a permission denial. Do not use background controls as targets; resume validation when the intended app is in the foreground.
+
 If permissions on an older version's `desktop.lock` file prevent startup, use the following command to change permissions on that same file. Do not delete or replace it, because a server may still be running.
 
 ```bash
@@ -124,13 +126,45 @@ python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/b.json" close
 
 The client keeps the current task_id in its session file, so turn/yield/cancel do not require it again. Only queued tasks can be cancelled with `cancel`; finish a running task with `yield`. Use `yield --requeue` only when continuing remaining work after reaching a safe boundary. The default one-second quantum is not a forced interruption deadline. Check `yield_due` and yield when the current work unit finishes. `renew --ttl 30` extends only the TTL and does not restart the quantum.
 
-If a yield response is lost, use `retry-yield` to resend the previous turn's original request, then use turn to check the current state. Do not substitute a yield with a new turn's token or a different requeue value. If a task or lease expires, or an action's outcome is unknown, do not automatically repeat input or submission. Inspect the actual result with status before deciding whether to continue as a new task. Enqueuing the same task_id does not restart a terminal task. Each task is limited to 256 turns; if another requeue is rejected with capacity, the current turn can still be finished with `yield`. See the [API reference](api.md) for HTTP fields and idempotency rules.
+Enqueuing the same task_id does not restart a terminal task. Each task is limited to 256 turns; if another requeue is rejected with capacity, the current turn can still be finished with `yield`. See [recovery](#recovery-and-request-replay) for lost responses or expiry and the [API reference](api.md) for HTTP fields and idempotency rules.
 
 Single-agent work and existing integrations can continue using `acquire --ttl 30` → fresh status → actions and verification → `release`. The queue waits for a manual lease to end, so use enqueue for every participating agent when fair turn-taking is needed. Calling release during a scheduled turn returns a scheduled_turn error.
 
 To override defaults, give every agent the same `--endpoint` and `--token-file` options. The client also supports `CU_ENDPOINT`, `CU_TOKEN_FILE`, and `CU_SESSION_FILE`. Session files contain credentials and the last action payload, including any entered text. Files use mode 0600 on POSIX and a protected DACL allowing only the current user on Windows. Close clears the file's contents. Do not share these files externally or commit them to a repository.
 
-The client retains the latest snapshot/lease and task_id. `act --action '<JSON>'` generates a UUID and saves the request before sending it. `retry` resends the last action request unchanged. After a transport error, the client blocks another `act`. An expired session can be replaced by opening a new file, but investigate any uncertain action outcome first. Creating a new session does not mean the previous work failed.
+The client retains the latest snapshot/lease and task_id. `act --action '<JSON>'` generates a UUID and saves the request before sending it. After an action transport error, the client blocks another `act` until the uncertain request is resolved.
+
+## Focused status output
+
+Read-only inspection does not require a lease or a queued task. For example, open a private session and inspect controls with a matching title or description:
+
+```bash
+RUN_DIR=$(mktemp -d)
+SESSION_FILE="$RUN_DIR/inspect.json"
+python3 "$SKILL_DIR/scripts/client.py" --session-file "$SESSION_FILE" open --agent-id inspector
+python3 "$SKILL_DIR/scripts/client.py" --session-file "$SESSION_FILE" status --match 'Apply' --actionable --limit 20
+python3 "$SKILL_DIR/scripts/client.py" --session-file "$SESSION_FILE" close
+```
+
+`--match` searches exposed title and description with a literal, case-insensitive substring; it does not search values. `--role` selects an exact observed native role. `--actionable` selects nodes whose enabled state is not false and which advertise actions or settable attributes. Filters combine with AND. `--limit` accepts 1–1,200 matching nodes; their ancestors are added for context, so the returned node count may exceed the limit. Use `result.view.matched_node_ids` to distinguish selected matches from context ancestors.
+
+These options reduce CLI output only. HTTP status still sends `{}` and captures the whole backend snapshot; action validation still checks that whole state. `state.truncated` includes nodes omitted by the projection. The `result.view` counts and `source_truncated` explain whether the CLI omitted nodes or the backend observation was already incomplete. Narrow filters may hide useful controls: broaden them or omit all options to see the unchanged default output. If ancestor context cannot distinguish duplicate labels, inspect unfiltered status before acting; sibling labels may supply the missing context. See the [API reference](api.md#cli-status-projection) for exact metadata fields.
+
+For scheduled actions, wait for running, then obtain fresh status before selecting targets. Do not use read-only status access to poll the UI while queued; use `turn`, which does not contend for native UI observation.
+
+## Recovery and request replay
+
+The client saves requests before sending them. Choose recovery based on the operation whose response was lost:
+
+| Operation | Recovery |
+| --- | --- |
+| enqueue | Use `retry-enqueue` to resend the original task_id and all options, then `turn` to check the current state. Do not replace the task ID or change options. A turn response of task_not_found alone does not prove a delayed enqueue failed |
+| act | Use `retry` with the saved request ID and identical payload, including snapshot and lease. A timeout alone does not justify repeating the action under a new ID |
+| yield | Use `retry-yield` to resend the original task_id, old lease token, and requeue value, then confirm the current state with `turn`. Do not substitute a new turn's token or a different requeue value |
+
+On `stale_snapshot`, read fresh status, reconsider the action, and use a new request ID only for the newly decided action. On `lease_required`, inspect turn for expiration; in manual mode, reacquire before taking a fresh snapshot. If the task or lease expired, inspect the current result before deciding whether to continue as a new task. Do not automatically repeat input or submission.
+
+On `action_outcome_unknown`, inspect status for the actual result; retry returns the cached error, not a new UI attempt. Status requires only a valid session, so a lease is unnecessary for this recovery check. Server restart and session expiration can remove the request history: investigate uncertain outcomes before opening a replacement session or issuing new request/task IDs. A new session does not mean previous work failed.
 
 ## Mock exercise without UI changes
 

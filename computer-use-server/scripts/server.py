@@ -130,7 +130,7 @@ class ComputerServer:
 
     def _ttl(self, payload):
         ttl = payload.get("ttl", self.lease_ttl)
-        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or not 1 <= ttl <= 120:
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not 1 <= ttl <= 120 or not math.isfinite(ttl):
             raise APIError("invalid_request", "ttl must be between 1 and 120 seconds", 400)
         return ttl
 
@@ -176,7 +176,7 @@ class ComputerServer:
         timeout = payload.get("queue_timeout", 60)
         for value, name, low, high in ((quantum, "quantum_ms", 100, 10000),
                                         (timeout, "queue_timeout", 1, 300)):
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high or not math.isfinite(value):
                 raise APIError("invalid_request", f"{name} must be between {low} and {high}", 400)
         options = {"intent": intent, "quantum_ms": quantum, "ttl": self._ttl(payload),
                    "queue_timeout": timeout}
@@ -320,13 +320,15 @@ class ComputerServer:
                 return {"released": True}
             if operation == "status":
                 state, digest = self._observe()
+                # Observation can outlast a lease. Apply any handoff before
+                # storing the snapshot so a new grant cannot invalidate it.
+                self._expire()
                 snapshot_id = secrets.token_urlsafe(24)
                 snapshots = session["snapshots"]
                 while len(snapshots) >= 16:
                     del snapshots[next(iter(snapshots))]
                 snapshots[snapshot_id] = {"digest": digest, "revision": self.revision,
                                           "created": self.clock()}
-                self._expire()
                 lease = {"held": bool(self.lease)}
                 if self.lease:
                     lease.update(owner_session_id=self.lease["owner"],
