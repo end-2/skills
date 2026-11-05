@@ -35,6 +35,7 @@ class Accessible:
         self.cache_clears = 0
         self.text_reads = 0
         self.numeric = None
+        self.extents = None
 
     def clearCache(self):
         self.cache_clears += 1
@@ -68,6 +69,11 @@ class Accessible:
     def grabFocus(self):
         self.calls.append(("focus",))
         return self.result
+
+    def getExtents(self, coordinates):
+        if self.extents is None:
+            raise NotImplementedError
+        return self.extents
 
     def queryAction(self):
         if not self.actions:
@@ -123,7 +129,8 @@ class LinuxBackendTests(unittest.TestCase):
         self.app = Accessible("APPLICATION", "Example", children=[self.frame])
         self.desktop = Accessible("DESKTOP", children=[self.app])
         self.api = types.SimpleNamespace(Registry=types.SimpleNamespace(getDesktop=lambda index: self.desktop))
-        for name in ("DEFUNCT", "ACTIVE", "FOCUSED", "FOCUSABLE", "ENABLED", "EDITABLE", "CHECKED", "SELECTED"):
+        self.api.DESKTOP_COORDS = 0
+        for name in ("DEFUNCT", "ACTIVE", "FOCUSED", "FOCUSABLE", "ENABLED", "EDITABLE", "CHECKED", "SELECTED", "VISIBLE", "SHOWING"):
             setattr(self.api, "STATE_" + name, name)
         for name in ("FRAME", "DIALOG", "WINDOW", "PASSWORD_TEXT"):
             setattr(self.api, "ROLE_" + name, name)
@@ -165,6 +172,35 @@ class LinuxBackendTests(unittest.TestCase):
         self.assertNotEqual(before["value_hash"], after["value_hash"])
         self.assertTrue(after["text_truncated"])
         self.assertTrue(second["truncated"])
+
+    def test_frames_are_observed_only_for_visible_showing_components(self):
+        self.field.extents = (10, 20, 200, 30)
+        self.assertIsNone(self.node(self.backend.snapshot(), "Message")["frame"])
+        self.field.states.update({"VISIBLE", "SHOWING"})
+        self.assertEqual(self.node(self.backend.snapshot(), "Message")["frame"],
+                         {"x": 10, "y": 20, "width": 200, "height": 30})
+        self.field.extents = (-2147483648, -2147483648, 200, 30)
+        self.assertIsNone(self.node(self.backend.snapshot(), "Message")["frame"])
+
+    def test_raw_input_rechecks_foreground_before_dispatch(self):
+        from linux_input import LinuxInput
+        from test_linux_input import FakeRegistry, FakeX11
+        registry = FakeRegistry()
+        registry.getDesktop = lambda index: self.desktop
+        self.api.Registry = registry
+        for name, value in {"KEY_STRING": "string", "KEY_PRESS": "press", "KEY_RELEASE": "release",
+                            "KEY_LOCKMODIFIERS": "lock", "KEY_UNLOCKMODIFIERS": "unlock"}.items():
+            setattr(self.api, name, value)
+        driver = LinuxInput(self.api, x11=FakeX11(), environment={"DISPLAY": ":0"})
+        backend = LinuxBackend(api=self.api, input_driver=driver)
+        state = backend.snapshot()
+        self.assertTrue(state["capabilities"]["type_text"])
+        backend.act({"kind": "type_text", "pid": 42, "text": "checked"})
+        self.assertEqual(registry.events, [("key", 0, "checked", "string")])
+        registry.events.clear()
+        self.frame.states.remove("ACTIVE")
+        self.assert_error("element_unavailable", backend.act, {"kind": "key_press", "pid": 42, "key": "enter"})
+        self.assertEqual(registry.events, [])
 
     def test_nontext_control_values_and_toggle_states_are_observable(self):
         slider = Accessible("SLIDER", "Volume", states={"ENABLED"})

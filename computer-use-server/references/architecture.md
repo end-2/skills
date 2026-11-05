@@ -36,6 +36,8 @@ A `snapshot_id` is a short-lived reference owned by one session. The `revision` 
 
 OS UI reads and actions cannot form one atomic transaction. Changes during observation, human input just after dispatch, and state omitted by accessibility APIs cannot be detected completely. When a tree is truncated, matching fingerprints do not prove that the entire UI is unchanged. Observe and verify each step of a sequence of actions.
 
+Native keyboard and pointer events use the same lease, snapshot, and replay path. The broker validates the foreground PID, advertised capability, finite coordinates, observed display bounds, and bounded input length/duration before dispatch. Each chord or drag releases its held inputs within the request; inputs never remain intentionally held across a scheduler yield. macOS uses Quartz, Windows uses SendInput, and supported X11 sessions use the Linux input provider. Provider acceptance is followed by application-state verification; it is not proof that the app processed an event. Native Wayland/secure desktop restrictions remain explicit rather than triggering an unadvertised fallback.
+
 ## OS selection and workers
 
 `backend_factory.py` detects the OS and imports only the selected backend. The mock backend does not import native dependencies. macOS uses a Swift process with a JSONL protocol. On Windows and Linux, `process_backend.py` starts `python_worker.py`, which loads the native adapter in a single-threaded process. Windows uses UIA COM objects on the MTA thread that created them. Linux refreshes the AT-SPI cache before observation.

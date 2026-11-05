@@ -14,10 +14,12 @@ from pathlib import Path
 import platform
 
 from backend_common import BackendError
+from input_actions import INPUT_KINDS
+from linux_input import LinuxInput, rectangle
 
 
 class LinuxBackend:
-    def __init__(self, *, max_nodes=1200, max_depth=12, api=None):
+    def __init__(self, *, max_nodes=1200, max_depth=12, api=None, input_driver=None):
         if type(max_nodes) is not int or not 1 <= max_nodes <= 10000:
             raise ValueError("max_nodes must be an integer from 1 to 10000")
         if type(max_depth) is not int or not 1 <= max_depth <= 40:
@@ -42,6 +44,8 @@ class LinuxBackend:
         self._active = None
         self._activation = {}
         self._truncated = False
+        self._input = input_driver if input_driver is not None else LinuxInput(api)
+        self._last_state = None
 
     def _check_open(self):
         if self._closed:
@@ -155,6 +159,19 @@ class LinuxBackend:
             del names[name]
         return interface, names
 
+    def _frame(self, element, state):
+        # AT-SPI only promises meaningful screen extents for visible/showing
+        # components; missing geometry is not a reason to guess a rectangle.
+        try:
+            if getattr(self._input, "is_wayland", False):
+                return None
+            if not all(state.contains(getattr(self.api, "STATE_" + name)) for name in ("VISIBLE", "SHOWING")):
+                return None
+            component = self._interface(element, "queryComponent")
+            return rectangle(component.getExtents(self.api.DESKTOP_COORDS)) if component is not None else None
+        except Exception:
+            return None
+
     def _visit(self, element, pid, path, depth, nodes, seen):
         if len(nodes) >= self.max_nodes or depth > self.max_depth:
             self._truncated = True
@@ -189,6 +206,7 @@ class LinuxBackend:
                 "title": title, "description": description, "value": value,
                 "title_hash": title_hash, "description_hash": description_hash, "value_hash": value_hash,
                 "text_truncated": a or b or c, "secure": secure,
+                "frame": self._frame(element, state),
                 "enabled": state.contains(self.api.STATE_ENABLED), "focused": state.contains(self.api.STATE_FOCUSED),
                 "actions": sorted(actions), "settable": sorted(settable), "children": []}
         # These flags let agents verify toggles/selections and let preflight
@@ -241,16 +259,20 @@ class LinuxBackend:
                 reason = "unavailable"
                 nodes = []
         identified = self._active is not None
-        return {"platform": "linux", "desktop_id": "local",
+        input_capabilities, input_state = self._input.status(identified)
+        state = {"platform": "linux", "desktop_id": "local",
                 "frontmost_app": apps[self._active[0]] if identified else None,
                 "applications": [apps[pid] for pid in sorted(apps)], "roots": roots, "nodes": nodes,
-                "truncated": self._truncated,
+                "truncated": self._truncated, "input": input_state,
                 "capabilities": {"snapshot": True, "accessibility": True, "screenshots": False,
+                    **input_capabilities,
                     "perform": identified, "set_value": identified, "focus": identified,
                     "activate_app": identified and bool(targets), "scope": "active_window",
                     "foreground_status": reason, "max_nodes": self.max_nodes, "max_depth": self.max_depth,
                     "activation_method": "AT-SPI Component.grabFocus on an unambiguous focusable window",
                     "activation_limitations": "Application/toolkit/compositor may decline focus, including on Wayland; verify status."}}
+        self._last_state = state
+        return state
 
     def _verify_foreground(self):
         if self._active is None:
@@ -265,6 +287,10 @@ class LinuxBackend:
         if not isinstance(action, dict):
             raise BackendError("invalid_action", "Action must be an object.")
         kind = action.get("kind")
+        if isinstance(kind, str) and kind in INPUT_KINDS:
+            if self._last_state is None:
+                raise BackendError("unsupported", "Read a fresh snapshot before native input.")
+            return self._input.act(action, self._last_state, self._verify_foreground)
         fields = {"perform": {"kind", "node_id", "action"}, "set_value": {"kind", "node_id", "value"},
                   "focus": {"kind", "node_id"}, "activate_app": {"kind", "pid"}}
         if not isinstance(kind, str) or kind not in fields or set(action) != fields[kind]:
@@ -321,3 +347,5 @@ class LinuxBackend:
         self._records.clear()
         self._activation.clear()
         self._active = None
+        self._last_state = None
+        self._input.close()

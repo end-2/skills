@@ -2,9 +2,9 @@
 
 Optional Windows dependency: ``python -m pip install uiautomation==2.0.29``.
 Source/API reference: https://github.com/yinkaisheng/Python-UIAutomation-for-Windows
-The worker owns the COM apartment and all retained controls. No coordinates,
-keyboard synthesis, screenshot capture, elevation, or foreground-lock bypass
-is used. A hung native provider is terminated by the parent worker transport.
+The worker owns the COM apartment and all retained controls. Explicit native
+input uses SendInput without elevation or foreground-lock bypass. A hung native
+provider is terminated by the parent worker transport. Screenshots are not used.
 """
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ import threading
 from typing import Any
 
 from backend_common import BackendError
+from input_actions import INPUT_KINDS, finite_number
+from windows_input import WindowsInput
 
 
 TEXT_LIMIT = 4096
@@ -90,6 +92,22 @@ def _process_name(pid: int) -> str | None:
         kernel32.CloseHandle(handle)
 
 
+def _frame(control):
+    """UIA bounding rectangles use physical screen coordinates; absent is null."""
+    try:
+        rect = control.BoundingRectangle
+        values = (rect.left, rect.top, rect.right, rect.bottom)
+        if not all(finite_number(value) for value in values):
+            return None
+        left, top, right, bottom = values
+        if right <= left or bottom <= top:
+            return None
+        return {"x": left, "y": top, "width": right-left, "height": bottom-top}
+    except Exception:
+        # Some providers omit geometry while still supporting semantic actions.
+        return None
+
+
 class WindowsBackend:
     """UIA controls and COM initialization never leave the creating thread.
 
@@ -99,7 +117,7 @@ class WindowsBackend:
     """
 
     def __init__(self, *, max_nodes: int = 1200, max_depth: int = 12,
-                 _automation=None, _name_lookup=None):
+                 _automation=None, _name_lookup=None, _input=None):
         if platform.system() != "Windows":
             raise BackendError("backend_unavailable", "The Windows backend requires Windows.")
         if type(max_nodes) is not int or not 1 <= max_nodes <= 10000:
@@ -112,6 +130,7 @@ class WindowsBackend:
         self._initialized = False
         self._auto = None
         self._name_lookup = _name_lookup or _process_name
+        self._input = _input if _input is not None else WindowsInput()
         self._reset()
         missing = object()
         previous = getattr(sys, "coinit_flags", missing)
@@ -143,6 +162,7 @@ class WindowsBackend:
             raise BackendError("backend_unavailable", "Backend has been closed.")
 
     def _reset(self) -> None:
+        self._last_state = {}
         self._records: dict[str, dict[str, Any]] = {}
         self._apps: dict[int, dict[str, Any]] = {}
         self._frontmost = None
@@ -215,7 +235,7 @@ class WindowsBackend:
                 "actions": actions, "settable": sorted(settable), "children": [],
                 "secure": secure, "text_truncated": text_truncated,
                 "title_hash": title_hash, "description_hash": description_hash, "value_hash": value_hash,
-                "runtime_id": list(runtime_id), "states": states}
+                "runtime_id": list(runtime_id), "states": states, "frame": _frame(control)}
         self._nodes.append(node)
         self._records[node_id] = {"control": control, "runtime_id": runtime_id, "pid": pid,
                                   "actions": set(actions), "settable": set(settable)}
@@ -292,13 +312,16 @@ class WindowsBackend:
                 if node_id is not None:
                     roots.append(node_id)
                 self._check_foreground()
-            return {"platform": "windows", "desktop_id": "local", "frontmost_app": frontmost,
+            input_state, input_caps = self._input.snapshot(frontmost["pid"] if frontmost else None)
+            state = {"platform": "windows", "desktop_id": "local", "frontmost_app": frontmost,
                     "applications": [self._app_json(pid) for pid in sorted(self._apps)],
-                    "roots": roots, "nodes": self._nodes, "truncated": self._truncated,
+                    "roots": roots, "nodes": self._nodes, "truncated": self._truncated, "input": input_state,
                     "capabilities": {"snapshot": True, "perform": True, "set_value": True,
                                      "focus": True, "activate_app": True, "screenshots": False,
                                      "scope": "foreground_window", "application_scope": "visible_top_level_windows",
-                                     "max_nodes": self.max_nodes, "max_depth": self.max_depth}}
+                                     "max_nodes": self.max_nodes, "max_depth": self.max_depth, **input_caps}}
+            self._last_state = state
+            return state
         except Exception as exc:
             self._reset()
             raise _native_error(exc, "snapshot") from exc
@@ -309,6 +332,9 @@ class WindowsBackend:
             if not isinstance(action, dict) or not isinstance(action.get("kind"), str):
                 raise BackendError("invalid_action", "action must be an object with a string kind.")
             kind = action["kind"]
+            if kind in INPUT_KINDS:
+                self._check_foreground()
+                return self._input.act(action, self._last_state)
             fields = {"activate_app": {"kind", "pid"}, "perform": {"kind", "node_id", "action"},
                       "set_value": {"kind", "node_id", "value"}, "focus": {"kind", "node_id"}}
             if kind not in fields:

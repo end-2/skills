@@ -81,6 +81,8 @@ Use cancel for queued tasks and yield to finish running tasks. Manual release of
 
 This example shows the macOS schema; its values are not actual node references. Traverse `children` from `roots`. Node IDs refer to a particular observation and are not permanent selectors. Trees cover the active application on macOS, the foreground window on Windows, and the identified active window on Linux. To switch applications, check the observed pid and activation support, activate the target, then read status again. A `null` attribute is unknown or not exposed by the application.
 
+On macOS, a non-permission Accessibility failure while reading the frontmost app's root returns a partial status rather than hiding the application list. `state.observation_error` contains the original `code`, `message`, and optional `details` (including the native `ax_error` when available). The state retains `applications` and `frontmost_app`, with empty `roots`/`nodes`, `truncated: true`, and `perform`, `set_value`, and `focus` capabilities set to false. `activate_app` remains available for an observed PID, subject to OS restrictions; observe again after activation. This diagnostic does not mean the application has no controls. Permission failures still return `permission_denied` instead of a partial status. Failures in individual child nodes continue to mark the tree truncated without setting this root-specific diagnostic.
+
 Windows returns `platform: windows` and `capabilities.scope: foreground_window`; nodes include runtime_id and toggle/selection/expand state. Linux returns `platform: linux`, `scope: active_window`, `foreground_status`, and per-application `can_activate`. If the ACTIVE window is missing or ambiguous, frontmost_app=null and mutation capabilities are disabled. Linux's application list contains apps exposed by AT-SPI; Windows lists apps with visible top-level windows.
 
 String title/description/value fields display at most 4,096 characters. Clipping sets both the node's `text_truncated` and the overall `truncated` to true. `title_hash`, `description_hash`, and `value_hash` contain SHA-256 hashes of the full original strings, so changes confined to an omitted suffix still invalidate state verification. A hash cannot reveal omitted text; do not replace an entire long field whose full contents are unknown. Secure fields have both value and value_hash set to null.
@@ -124,7 +126,30 @@ The original snapshot_id and complete-state fingerprint remain in use for action
 | `focus` | node_id | focused appears in settable |
 | `activate_app` | pid | Positive pid from observed applications. Subject to OS activation restrictions |
 
-Each action object contains only kind and the fields listed for it. Disabled nodes cannot be acted on. Secure input values are neither read nor modified. Even if Accessibility reports a successful value change, verify subsequent state to confirm the application processed the intended operation.
+Each action object contains only kind and the fields listed for it. Disabled nodes cannot be acted on. Secure values are not read, and semantic set_value does not modify secure fields. Even if Accessibility reports a successful value change, verify subsequent state to confirm the application processed the intended operation.
+
+## Native keyboard and pointer input
+
+These actions use the same `act` envelope, exclusive lease, whole-state snapshot validation, and request replay cache as semantic actions. Each requires `pid` equal to the observed foreground application's PID and a true `state.capabilities` flag named after its kind. The backend rechecks foreground before dispatch. Input acceptance means events were submitted; verify the actual application result before continuing.
+
+| kind | Required fields besides kind and pid | Optional fields |
+| --- | --- | --- |
+| type_text | text: 1–4,096 Unicode characters, no NUL | None |
+| key_press | key: one supported lowercase key name | modifiers: list, default [] |
+| mouse_move | x, y | None |
+| mouse_click | x, y | button: left (default), right, middle; count: 1 (default)–3; modifiers |
+| mouse_drag | from_x, from_y, to_x, to_y | button; duration_ms: 100–2,000, default 400; modifiers |
+| scroll | x, y, delta_x, delta_y | None |
+
+`type_text` types into the current focus and does not replace a field or use the clipboard. Use semantic `focus`, a frame-derived click, or a verified keyboard navigation step to establish the target first. Chords and drags attempt press and release within one request; there is no intentional held-input state across turns. If the OS rejects cleanup or a worker exits mid-action, investigate the uncertain state before continuing. There is no general shell execution endpoint: terminal commands are text input followed by an explicit Enter action.
+
+Modifiers are unique names from `ctrl`, `alt`, `shift`, and `meta` (Command on macOS, Windows key on Windows, Super on Linux). Keys include lowercase a–z, 0–9, ASCII punctuation `-=[]\\;',./` and backtick, plus `space`, `enter`, `tab`, `escape`, `backspace`, `delete`, `insert`, `home`, `end`, `page_up`, `page_down`, `left`, `right`, `up`, `down`, and `f1`–`f12`. Key mappings represent named keys; use `type_text` for Unicode text instead of assuming a keyboard layout.
+
+Pointer coordinates use `state.input.coordinate_space: screen` and the reported `units`: points on macOS, pixels on Windows/Linux. Each point must fall inside an observed rectangle in `input.displays`; negative coordinates are valid when an observed display extends left or above the primary display. Node `frame` is a rectangle in the same coordinate space or null when unavailable. macOS also exposes `subrole`, such as AXCloseButton. `input.pointer` is the observed pointer position or null. Do not convert using screenshot pixel dimensions or infer an absent frame.
+
+Scroll deltas are integer wheel steps from −20 to 20, with at least one nonzero value; positive means right/down. The pointer is positioned at x,y before scrolling. The target app determines the distance per step. `input.backend` identifies the native provider; `input.unavailable_reason` explains unavailable support when present. Native input does not bypass desktop lock, OS permission, or privilege restrictions.
+
+Secure field values stay redacted. Native typing can enter user-authorized text into the focused control; it does not reveal existing secure contents. Snapshot validation cannot make OS input and human activity atomic, and some apps expose only partial state.
 
 ## Error handling
 

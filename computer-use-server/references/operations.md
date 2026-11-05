@@ -50,6 +50,8 @@ When turn returns running, read status and choose the target and action. If it r
 
 UIA/COM objects are used only on the same MTA thread in the dedicated worker. Service Session 0, locked or secure desktops, other user sessions, and apps at different privilege levels may be inaccessible. Do not bypass these restrictions through elevation or synthetic keyboard input. Windows foreground activation failures are reported as `unsupported`. Controls exposing UIA ValuePattern support replacing their entire string value.
 
+Native keyboard and pointer actions use Windows SendInput; Unicode text uses UTF-16 input packets. A successful submission does not prove that a higher-privilege application received the events. Check the foreground PID, advertised input capabilities, and resulting UI state.
+
 Authentication and session files are created with a protected DACL granting access only to the current user. Do not evaluate Windows permissions using POSIX chmod bits. Reusing an existing ordinary file as token-file may fail because of inherited ACLs; let the server create a file at a new path in the user's directory. Use a filesystem that supports ACLs and a trusted parent directory.
 
 ## macOS
@@ -65,6 +67,8 @@ Enabling the built-in `Codex Computer Use` does not imply that this skill's inde
 After the user grants permission to the identified subject, restart the server and verify access with status. The server does not open permission prompts automatically. Source changes that alter the helper path may require another approval. Screen capture permission is not used.
 
 Use an unlocked, logged-in desktop for live UI validation. If status succeeds but reports `loginwindow` as the frontmost process, that alone is not a permission denial. Do not use background controls as targets; resume validation when the intended app is in the foreground.
+
+Native input uses Quartz events and checks event-posting permission without opening a prompt. Inspect the six input capability flags and `state.input` for availability and display coordinates. AX controls may support semantic actions even when native posting is unavailable, or expose no writable value while native typing is supported, as with Terminal.
 
 If permissions on an older version's `desktop.lock` file prevent startup, use the following command to change permissions on that same file. Do not delete or replace it, because a server may still be running.
 
@@ -84,6 +88,8 @@ sudo apt install python3-pyatspi
 On other distributions, install their pyatspi2/AT-SPI Python bindings. An arbitrary venv or pyenv Python may not see the system bindings. The worker uses the same Python interpreter as the server, so select an interpreter where `import pyatspi` succeeds.
 
 Run from the logged-in user's graphical terminal. DISPLAY or WAYLAND_DISPLAY and a user D-Bus connection are required. Do not fabricate screen state on a headless server or an ordinary SSH session. If an app does not expose AT-SPI, or there is no ACTIVE window or more than one, `foreground_status` explains the condition and actions are rejected. App activation uses Component.grabFocus on a uniquely selectable, focusable window; the Wayland compositor or toolkit may reject it.
+
+Generic keyboard/pointer synthesis requires an X11 session with XTEST and XKEYBOARD. The provider loads libX11, and uses libXinerama when available for monitor rectangles. Horizontal wheel events additionally use libXtst because AT-SPI's X11 mouse synthesis handles only buttons 1–5; inspect `input.scroll_axes` before requesting horizontal scrolling. On Wayland, unavailable global input is reported explicitly while exposed semantic AT-SPI actions remain usable. Mouse capabilities also require observed display geometry; do not invent a screen size to enable them. AT-SPI string synthesis depends on the current keyboard map and input method, so verify Unicode results rather than assuming every string is delivered.
 
 ## Per-agent sessions and turns
 
@@ -165,6 +171,23 @@ The client saves requests before sending them. Choose recovery based on the oper
 On `stale_snapshot`, read fresh status, reconsider the action, and use a new request ID only for the newly decided action. On `lease_required`, inspect turn for expiration; in manual mode, reacquire before taking a fresh snapshot. If the task or lease expired, inspect the current result before deciding whether to continue as a new task. Do not automatically repeat input or submission.
 
 On `action_outcome_unknown`, inspect status for the actual result; retry returns the cached error, not a new UI attempt. Status requires only a valid session, so a lease is unnecessary for this recovery check. Server restart and session expiration can remove the request history: investigate uncertain outcomes before opening a replacement session or issuing new request/task IDs. A new session does not mean previous work failed.
+
+## Typing in a terminal
+
+Use a dedicated test window when validating input. Wait for a running turn, activate the observed Terminal PID, take fresh status, and focus the shell's observed node when it advertises `focused` as settable. Terminal text areas commonly expose readable output and focus without a writable `value`; use native typing in that case.
+
+Replace PID 123 with the observed foreground PID. First check `capabilities.type_text` and `capabilities.key_press`, and confirm that the intended prompt is ready. These example commands use an already-open session and lease:
+
+```bash
+python3 "$SKILL_DIR/scripts/client.py" --session-file "$SESSION_FILE" act \
+  --action '{"kind":"type_text","pid":123,"text":"printf '\''skill-input-ok\\n'\''"}'
+python3 "$SKILL_DIR/scripts/client.py" --session-file "$SESSION_FILE" status
+python3 "$SKILL_DIR/scripts/client.py" --session-file "$SESSION_FILE" act \
+  --action '{"kind":"key_press","pid":123,"key":"enter"}'
+python3 "$SKILL_DIR/scripts/client.py" --session-file "$SESSION_FILE" status
+```
+
+Verify the output marker, not just the echoed command. Keep typing, Enter, and result verification in one turn. For application shortcuts, use a single `key_press` with modifiers, such as key `a` and modifiers `["meta"]` on macOS. Use `type_text` for text and `key_press` for navigation or commands; app behavior and keyboard layouts can differ.
 
 ## Mock exercise without UI changes
 

@@ -18,6 +18,7 @@ from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from backend_common import BackendError
+from input_actions import INPUT_KINDS, validate_input_action
 from backend_factory import BACKENDS, create_backend, resolve_backend
 from platform_support import default_state_dir, default_token_path, private_file, lock_file
 
@@ -239,6 +240,12 @@ class ComputerServer:
         if not isinstance(action, dict):
             raise APIError("invalid_request", "action must be an object", 400)
         kind = action.get("kind")
+        if isinstance(kind, str) and kind in INPUT_KINDS:
+            try:
+                return validate_input_action(action, state)
+            except BackendError as error:
+                status = 409 if error.code == "element_unavailable" else 400
+                raise APIError(error.code, error.message, status, error.details) from error
         fields = {"perform": {"kind", "node_id", "action"}, "set_value": {"kind", "node_id", "value"},
                   "focus": {"kind", "node_id"}, "activate_app": {"kind", "pid"}}
         if not isinstance(kind, str) or kind not in fields or set(action) != fields[kind]:
@@ -377,11 +384,11 @@ class ComputerServer:
             self._owned_lease(sid, payload.get("lease_token"))
             if self.clock() - snapshot["created"] >= self.snapshot_ttl or snapshot["digest"] != current or snapshot["revision"] != self.revision:
                 raise APIError("stale_snapshot", "Desktop state changed; read status and re-evaluate")
-            self._validate_action(payload.get("action"), state)
+            native_action = self._validate_action(payload.get("action"), state) or payload["action"]
             # Invalidate all snapshots even if an action has no visible effect or times out.
             self.revision += 1
             try:
-                result = self.backend.act(payload["action"])
+                result = self.backend.act(native_action)
             except Exception as exc:
                 raise APIError("action_outcome_unknown", "Action did not return a confirmed result; inspect status before deciding next steps", 502,
                                {"backend_code": getattr(exc, "code", "backend_error"), "outcome_unknown": True}) from exc
