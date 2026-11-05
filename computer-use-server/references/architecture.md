@@ -1,4 +1,4 @@
-# 구조와 보장 범위
+# Architecture and Guarantees
 
 ```text
 Agent A ─ client.py / HTTP ─ session A ─┐
@@ -16,44 +16,44 @@ Agent C ─ client.py / HTTP ─ session C ─┘       │
                                       one OS desktop
 ```
 
-## 다중 에이전트
+## Multiple agents
 
-HTTP 연결은 여러 스레드에서 받지만 backend 호출과 세션 상태 변경은 같은 mutex 안에서 실행한다. 같은 데스크톱은 포커스·활성 앱을 공유하므로 앱별 잠금만으로는 안전하지 않다. 세션별 비밀 토큰은 다른 에이전트의 세션/스냅샷을 실수로 재사용하는 것을 막는다. 잠금 소유권은 매 획득 때 새 토큰과 증가하는 generation으로 구분한다. 만료된 소유자가 돌아와도 예전 토큰으로 조작할 수 없다.
+HTTP connections run on multiple threads, but backend calls and session changes share one mutex. Applications on the same desktop share focus and the active application, so a separate lock for each application is insufficient. Session tokens prevent accidental reuse of another agent's session or snapshots. Each lease acquisition issues a new token and increments its generation, preventing an expired owner from acting with an old token.
 
-서버 CLI는 모든 native 백엔드에서 사용자별 파일 잠금으로 두 번째 broker 실행을 거부한다. POSIX는 flock, Windows는 msvcrt byte-range lock을 사용한다. 모든 에이전트는 같은 상태 디렉터리 설정을 사용한다. 프로세스 worker를 늘리거나 서로 다른 포트에 broker를 복제하지 않는다. 다른 사용자 계정·외부 자동화 도구·사람의 입력은 이 잠금에 참여하지 않는다.
+For every native backend, the server CLI uses a per-user file lock to reject a second broker: `flock` on POSIX and an `msvcrt` byte-range lock on Windows. All agents must use the same state directory configuration. Do not increase the number of broker processes or run copies on different ports. Other user accounts, external automation tools, and human input do not participate in this lock.
 
-시분할은 OS별 입력 계층 위의 공통 broker에서 수행한다. 에이전트가 enqueue한 의도를 FIFO로 배정하고, 실행 중인 에이전트가 안전한 작업 경계에서 yield하면 다음 차례를 준다. 재대기는 큐 끝으로 이동하므로 협력하는 에이전트는 순환하며 작업한다. quantum은 양보 권고인 soft limit이며 native 호출이나 여러 단계의 UI 작업을 중간에 강제 선점하지 않는다. `renew`도 quantum을 초기화하지 않는다.
+The shared broker schedules turns above the OS-specific input layer. It assigns enqueued intentions in FIFO order and grants the next turn when the current agent yields at a safe work boundary. Requeued tasks move to the tail, allowing cooperating agents to take turns. The quantum is a soft limit that recommends yielding; it does not interrupt a native call or force a handoff during a sequence of UI actions. `renew` extends the lease TTL without resetting the quantum.
 
-작업 큐는 UI 명령이나 node_id를 실행 대기시키지 않는다. 각 차례는 새 lease token/generation을 사용하고 다시 status를 읽어야 한다. 스케줄러 메타데이터만 읽는 turn과 달리 status도 UI 호출과 직렬화되므로, 대기자는 제한된 간격의 turn polling을 사용한다. TTL/큐 만료는 작업 종료 상태로 기록하고 동작을 재생하지 않는다. 미확정 결과를 재관찰하는 책임은 에이전트에 있다.
+The queue stores intentions, not pending UI commands or `node_id` values. Each turn receives a fresh lease token and generation and requires a new `status` observation. `turn` reads scheduler metadata without calling the UI backend; `status` invokes the backend and is serialized with other UI calls. Waiting agents should poll `turn` at bounded intervals. Lease or queue expiration records a terminal task state and does not replay actions. Agents must inspect the UI to resolve uncertain outcomes.
 
-기존 수동 acquire는 호환 모드다. 수동 lease를 가진 에이전트가 계속 갱신하거나 예약 차례 소유자가 양보하지 않으면 공정한 교대를 보장하지 못한다. 공유 폼처럼 한 에이전트의 중간 결과를 다른 에이전트가 바꿀 수 있는 작업은 함께 완료·검증할 단위를 먼저 정한다. 협력적 시분할은 앱 데이터나 사용자 입력을 격리하지 않는다.
+Manual `acquire` remains available for compatibility. Fair rotation is not guaranteed if a manual lease holder keeps renewing or a scheduled owner does not yield. For shared forms and similar tasks, define the unit of work that must be completed and verified before another agent can change its intermediate results. Cooperative scheduling does not isolate application data or human input.
 
-진짜 병렬 UI 실행이 필요하면 별도 VM/OS 로그인 세션마다 broker를 띄워 데스크톱 자체를 격리한다. 앱이나 탭만 다르다는 이유로 이 구현의 전역 잠금을 제거하지 않는다.
+For parallel UI execution, isolate desktops using separate VMs or OS login sessions, each with its own broker. Different applications or tabs do not justify removing this implementation's global lock.
 
-## 관찰과 동작
+## Observation and actions
 
-`snapshot_id`는 세션 소유의 짧은 수명 참조이고, `revision`은 상태 변경 및 조작 시도 때 증가한다. 조작 전에 backend 상태를 다시 읽고 전체 반환 상태의 SHA-256과 revision을 비교한다. 각 native worker는 마지막 관찰의 실제 접근성 객체 참조를 보관한다. 경로 기반 node ID가 다른 항목으로 이동했어도 관찰 비교를 통과하기 전에는 실행하지 않는다.
+A `snapshot_id` is a short-lived reference owned by one session. The `revision` increases when observed state changes, an action is dispatched, or a scheduled turn is granted. Before dispatch, the broker reads the backend state again and compares both its SHA-256 fingerprint and revision with the snapshot. Each native worker retains the accessibility object references from its latest observation. A path-based node ID cannot authorize an action without passing this state comparison, even if that path now identifies another item.
 
-OS UI 읽기와 동작을 하나의 원자적 트랜잭션으로 묶을 수는 없다. 관찰 중의 변경, dispatch 직후 사용자 개입, 접근성 API가 노출하지 않는 상태는 완전히 탐지할 수 없다. 트리가 잘렸을 때 해시가 같다는 사실은 전체 UI의 동일성을 보장하지 않는다. 여러 단계 동작은 각각 관찰하고 검증한다.
+OS UI reads and actions cannot form one atomic transaction. Changes during observation, human input just after dispatch, and state omitted by accessibility APIs cannot be detected completely. When a tree is truncated, matching fingerprints do not prove that the entire UI is unchanged. Observe and verify each step of a sequence of actions.
 
-## OS 로딩과 worker
+## OS selection and workers
 
-`backend_factory.py`가 OS를 확인하고 선택된 백엔드만 import한다. mock은 native 의존성을 import하지 않는다. macOS는 기존 Swift JSONL 프로세스를 사용한다. Windows/Linux는 `process_backend.py` → `python_worker.py`의 단일 스레드 프로세스 안에서 native adapter를 로딩한다. Windows는 UIA COM 객체를 만든 MTA 스레드에서 사용하고 Linux는 관찰 전에 AT-SPI 캐시를 갱신한다.
+`backend_factory.py` detects the OS and imports only the selected backend. The mock backend does not import native dependencies. macOS uses a Swift process with a JSONL protocol. On Windows and Linux, `process_backend.py` starts `python_worker.py`, which loads the native adapter in a single-threaded process. Windows uses UIA COM objects on the MTA thread that created them. Linux refreshes the AT-SPI cache before observation.
 
-Windows/Linux pipe I/O는 POSIX select에 의존하지 않는다. 응답 시간 초과 시 worker를 종료하고 객체 참조를 무효화한다. 다음 status로 worker를 새로 시작할 수 있지만 act는 자동으로 worker를 재시작하거나 조작을 재전송하지 않는다. 죽은 worker에 보낸 동작은 결과 미확정으로 처리한다. 초기 의존성 오류는 서버 시작 때 구조화된 오류로 출력한다. macOS Swift 컴파일/권한 검사는 첫 status에서 수행한다.
+Pipe I/O on Windows and Linux does not depend on POSIX `select`. A response timeout terminates the worker and invalidates its object references. A subsequent `status` may start a new worker, but `act` never automatically restarts the worker or resends an action. An action sent to a worker that dies has an uncertain outcome. Initial dependency failures produce structured errors at server startup. macOS compiles the Swift helper and checks accessibility permission on the first `status` call.
 
-같은 요청을 재전송하면 세션 메모리에 저장한 결과/오류를 반환한다. 세션당 256개 결과를 보관하며 임의로 지우고 다시 실행하지 않는다. 한도가 차면 새 세션이 필요하다. 이는 **살아 있는 서버의 동일 세션 안에서의 중복 억제**다. 프로세스 crash를 넘는 exactly-once 보장은 없으며 재시작 후 미확정 조작은 상태를 조사해야 한다.
+Repeating an identical action request returns the result or error held in session memory. Each session retains up to 256 action records; records are not evicted to permit re-execution. Reaching the limit requires a new session. This provides **duplicate suppression within the same session of a running server**. It does not guarantee exactly-once execution across a process crash. After a restart, inspect the UI before deciding how to handle an uncertain action.
 
-## 배포 범위
+## Deployment scope
 
-Python 표준 HTTP 서버를 사용하는 로컬 에이전트 도구다. loopback 주소만 bind하고, bearer token, 세션 token, Host/Origin 검사, 크기/연결 수 제한을 적용한다. 공유 bearer token을 가진 같은 OS 사용자들은 동일 신뢰 영역이며, 적대적인 tenant 간 보안 경계는 아니다. 인터넷 공개·TLS 원격 제공·영속 작업 큐·MCP transport는 이 구현의 범위가 아니다.
+This is a local agent tool built on Python's standard HTTP server. It binds only to loopback and applies bearer authentication, session tokens, Host/Origin checks, and request-size and connection limits. Clients running as the same OS user and sharing the bearer token belong to one trust domain; this is not a security boundary between hostile tenants. Internet exposure, remote TLS service, a persistent task queue, and MCP transport are outside this implementation's scope.
 
-원격 호스트가 필요하면 인증·TLS·권한 분리와 각 호스트의 broker를 갖춘 별도 gateway를 구현한다. MCP가 필요하면 HTTP API를 호출하는 adapter를 추가하되 잠금/상태 검증을 우회하지 않는다.
+Remote hosts require a separate gateway with authentication, TLS, permission isolation, and a broker on each host. An MCP adapter can call the HTTP API, but must preserve its locking and state validation.
 
-## 백엔드 추가
+## Adding backends
 
-backend는 `snapshot() -> dict`, `act(action) -> dict`, `close()`를 구현한다. 상태에는 `platform`, `desktop_id`, `frontmost_app`, `applications`, `roots`, `nodes`, `truncated`, `capabilities`를 넣고 노드에는 id/role/actions/settable을 넣는다. 변경 없는 UI의 상태는 결정적으로 직렬화되어야 한다. 벽시계 timestamp, 매번 달라지는 ID 같은 필드는 상태 해시에 넣지 않는다. 활성 앱의 UI를 조작하는 백엔드는 전역 직렬화를 유지한다.
+A backend implements `snapshot() -> dict`, `act(action) -> dict`, and `close()`. Its state includes `platform`, `desktop_id`, `frontmost_app`, `applications`, `roots`, `nodes`, `truncated`, and `capabilities`; each node includes `id`, `role`, `actions`, and `settable`. An unchanged UI must serialize deterministically. Exclude wall-clock timestamps, newly generated IDs, and other unstable fields from the state fingerprint. Backends that manipulate the active application's UI must retain global serialization.
 
-현재 Windows UI Automation, macOS AX, Linux AT-SPI 어댑터를 제공한다. OS별 role/action 이름을 공통 문자열로 강제 변환하지 않으므로 에이전트는 매번 반환된 capability를 사용한다. 격리 브라우저 DOM 등의 백엔드는 추후 구현 대상이다.
+The available adapters use Windows UI Automation, macOS AX, and Linux AT-SPI. OS-specific role and action names are preserved rather than forced into one vocabulary, so agents must use the capabilities returned by each observation. Backends such as isolated browser DOM control remain future work.
 
-공식 자료: [Apple AXUIElement](https://developer.apple.com/documentation/applicationservices/axuielement), [Python http.server의 배포 범위](https://docs.python.org/3/library/http.server.html).
+Official references: [Apple AXUIElement](https://developer.apple.com/documentation/applicationservices/axuielement), [Python http.server deployment considerations](https://docs.python.org/3/library/http.server.html).

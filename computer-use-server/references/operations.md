@@ -1,8 +1,8 @@
-# 실행과 검증
+# Running and validating the server
 
-## OS 자동 선택
+## Automatic OS selection
 
-Python 3.10 이상이 필요하다. `SKILL_DIR`에 이 스킬의 절대 경로를 넣는다. 다른 에이전트가 이미 실행한 서버가 있으면 재사용한다. 아래는 macOS/Linux 쉘 예시다.
+Python 3.10 or later is required. Set `SKILL_DIR` to the absolute path of this skill. Reuse a server already started by another agent. The following examples use a macOS/Linux shell.
 
 ```bash
 SKILL_DIR=/absolute/path/to/computer-use-server
@@ -10,25 +10,25 @@ python3 "$SKILL_DIR/scripts/client.py" health
 python3 "$SKILL_DIR/scripts/server.py"
 ```
 
-health가 정상이라면 두 번째 명령은 실행하지 않는다. server는 foreground로 계속 실행되므로 오케스트레이터의 장기 실행 프로세스 또는 별도 터미널에서 유지한다. 테스트/작업 후에는 소유한 서버 프로세스만 종료한다. 로그인 시 자동 실행이나 서비스 등록은 하지 않는다.
+If health succeeds, do not run the second command. The server stays in the foreground; keep it running in a long-lived orchestrator process or a separate terminal. After testing or completing the task, stop only server processes you own. Do not register a service or enable startup at login.
 
-| 실행 OS | 자동 선택 | 필요한 구성 | 상태 조회 범위 |
+| Host OS | Selected backend | Requirements | Observation scope |
 | --- | --- | --- | --- |
-| Windows | windows | `uiautomation==2.0.29`, 로그인된 사용자 데스크톱 | 보이는 최상위 창의 앱 목록과 전경 창 UIA 트리 |
-| macOS | macos | Swift 컴파일러, Accessibility 권한 | 일반 GUI 앱 목록과 활성 앱 AX 트리 |
-| Linux | linux | pyatspi2, AT-SPI, 사용자 D-Bus 및 그래픽 세션 | 접근성 앱 목록과 유일하게 식별된 활성 창 |
+| Windows | windows | `uiautomation==2.0.29`, a logged-in user desktop | Apps with visible top-level windows and the foreground window's UIA tree |
+| macOS | macos | Swift compiler, Accessibility permission | Regular GUI apps and the active app's AX tree |
+| Linux | linux | pyatspi2, AT-SPI, user D-Bus, and a graphical session | Accessibility apps and a uniquely identified active window |
 
-기본 `--backend auto`는 `platform.system()`의 Windows/Darwin/Linux에 대응한다. `--backend windows`, `macos`, `linux`로 명시할 수도 있지만 실행 OS와 다르면 `backend_os_mismatch`로 종료한다. 다른 OS는 `unsupported_platform`으로 종료한다. `--backend mock`은 모든 지원 OS에서 사용할 수 있으며 native 의존성을 로딩하지 않는다. 시작 로그와 `health`의 `os`, `selected_backend`로 선택 결과를 확인한다. health는 프로세스 생존 확인이며 실제 UI 읽기는 status로 검증한다.
+The default `--backend auto` maps the Windows/Darwin/Linux values from `platform.system()` to their corresponding backends. You can also specify `--backend windows`, `macos`, or `linux`; a mismatch with the host OS exits with `backend_os_mismatch`. Other operating systems exit with `unsupported_platform`. `--backend mock` works on every supported OS without loading native dependencies. Check the startup log and the `os` and `selected_backend` fields in `health` to confirm the selection. Health checks process availability; use status to verify actual UI access.
 
-기본 token-file 위치:
+Default token-file locations:
 
-- Windows: `%LOCALAPPDATA%\computer-use-server\token` (미설정 시 사용자 `AppData\Local`).
-- macOS: `~/.local/state/computer-use-server/token` (기존 경로 유지).
-- Linux: `$XDG_STATE_HOME/computer-use-server/token`, 미설정 시 `~/.local/state/computer-use-server/token`.
+- Windows: `%LOCALAPPDATA%\computer-use-server\token`, falling back to the user's `AppData\Local` if the variable is unset.
+- macOS: `~/.local/state/computer-use-server/token`, preserving the existing location.
+- Linux: `$XDG_STATE_HOME/computer-use-server/token`, falling back to `~/.local/state/computer-use-server/token` if the variable is unset.
 
 ## Windows
 
-PowerShell에서 같은 Python 환경에 의존성을 설치한다.
+Install the dependencies into the same Python environment from PowerShell.
 
 ```powershell
 $SkillDir = 'C:\path\to\computer-use-server'
@@ -36,7 +36,7 @@ python -m pip install -r "$SkillDir\scripts\requirements-windows.txt"
 python "$SkillDir\scripts\server.py"
 ```
 
-다른 PowerShell에서 에이전트별 고유 세션을 연다.
+Open a separate PowerShell session and create a unique session for each agent.
 
 ```powershell
 $SkillDir = 'C:\path\to\computer-use-server'
@@ -46,25 +46,25 @@ python "$SkillDir\scripts\client.py" --session-file $SessionFile enqueue --task-
 python "$SkillDir\scripts\client.py" --session-file $SessionFile turn --wait-seconds 10
 ```
 
-turn 결과가 running이면 status를 읽고 대상과 동작을 정한다. queued라면 제한된 대기나 독립 작업을 이어간다.
+When turn returns running, read status and choose the target and action. If it returns queued, continue waiting within a defined limit or do independent work.
 
-UIA/COM 객체는 전용 worker의 동일 MTA 스레드에서만 사용한다. 서비스의 Session 0, 잠긴/보안 데스크톱, 다른 사용자 세션, 권한 수준이 다른 앱은 접근되지 않을 수 있다. 관리자 권한 상승이나 키 입력으로 제한을 우회하지 않는다. Windows가 전경 활성화를 거부하면 `unsupported`로 보고한다. UIA ValuePattern을 제공하는 컨트롤에 문자열 전체 대체를 지원한다.
+UIA/COM objects are used only on the same MTA thread in the dedicated worker. Service Session 0, locked or secure desktops, other user sessions, and apps at different privilege levels may be inaccessible. Do not bypass these restrictions through elevation or synthetic keyboard input. Windows foreground activation failures are reported as `unsupported`. Controls exposing UIA ValuePattern support replacing their entire string value.
 
-인증/세션 파일은 현재 사용자만 접근하는 보호된 DACL로 생성한다. Windows의 POSIX chmod 비트로 권한을 판단하지 않는다. 기존의 일반 파일을 token-file로 재사용하면 상속 ACL 때문에 거부될 수 있으므로, 사용자 디렉터리의 새 경로에서 서버가 파일을 만들게 한다. ACL을 지원하는 파일시스템과 신뢰하는 상위 디렉터리가 필요하다.
+Authentication and session files are created with a protected DACL granting access only to the current user. Do not evaluate Windows permissions using POSIX chmod bits. Reusing an existing ordinary file as token-file may fail because of inherited ACLs; let the server create a file at a new path in the user's directory. Use a filesystem that supports ACLs and a trusted parent directory.
 
 ## macOS
 
-`swiftc`가 필요하다. 없으면 Xcode Command Line Tools를 설치한다. macOS 백엔드는 추가 pip 패키지를 요구하지 않는다.
+`swiftc` is required. Install Xcode Command Line Tools if it is missing. The macOS backend does not require additional pip packages.
 
-처음 status를 읽으면 Swift helper를 `~/Library/Caches/computer-use-server/`에 컴파일한다. 소스 hash가 실행파일 이름에 포함된다. 첫 컴파일은 일반 상태 조회보다 오래 걸릴 수 있으므로 첫 status가 클라이언트 타임아웃으로 끝나면 서버 로그/health를 확인한 후 상태 조회만 재시도한다.
+The first status request compiles the Swift helper into `~/Library/Caches/computer-use-server/`. Its executable name includes a source hash. Initial compilation can take longer than a normal status request. If the first status request hits the client's timeout, inspect the server log and health, then retry only the status request.
 
-실제 UI에 접근하려면 macOS의 Accessibility 권한이 필요하다. `permission_denied`가 나오면 먼저 실제 권한 심사 대상을 확인한다. 오류의 `helper_binary`는 AX 검사를 호출한 실행 파일 경로이며, 시스템 설정에서 허용해야 할 대상임을 보장하지 않는다. macOS는 실행 방식에 따라 실행을 책임지는 호스트 프로세스에 요청을 귀속할 수 있다. 부모 PID나 앱 이름만으로 CodexCLI, Terminal 또는 helper를 권한 대상으로 단정하지 않는다.
+Actual UI access requires macOS Accessibility permission. On `permission_denied`, first identify the subject of the permission decision. The error's `helper_binary` is the executable that called the AX check; it does not necessarily identify the item that needs permission in System Settings. Depending on how the process was launched, macOS may attribute the request to the responsible host process. Do not identify CodexCLI, Terminal, or the helper as the permission subject from a parent PID or app name alone.
 
-기본 제공 `Codex Computer Use`를 허용했더라도 이 스킬의 독립 Swift helper가 허용되었다는 뜻은 아니다. 이 서버는 해당 앱의 서비스나 권한을 공유하지 않는다. 권한 문제를 진단할 때는 읽기 전용 status 요청 직후 macOS TCC 로그의 `kTCCServiceAccessibility`, 요청 PID, `responsible_path`, `Sub`, 허용/거부 결과를 함께 확인한다. 예를 들어 `log show --last 1m --info --style compact --predicate 'subsystem == "com.apple.TCC" AND eventMessage CONTAINS[c] "ax-bridge"'`로 관련 기록을 좁힐 수 있다. 로그가 없거나 대상이 가려져 있으면 특정 권한 대상을 추측하지 않는다.
+Enabling the built-in `Codex Computer Use` does not imply that this skill's independent Swift helper has permission. This server does not share that app's service or permissions. To diagnose access, issue a read-only status request and correlate `kTCCServiceAccessibility`, the requesting PID, `responsible_path`, `Sub`, and the allow/deny result in the macOS TCC logs immediately afterward. For example, narrow the records with `log show --last 1m --info --style compact --predicate 'subsystem == "com.apple.TCC" AND eventMessage CONTAINS[c] "ax-bridge"'`. If logs are unavailable or the subject is redacted, do not guess which item needs permission.
 
-확인한 대상에 사용자가 권한을 부여한 뒤 서버를 재시작하고 status로 검증한다. 서버는 권한 프롬프트를 자동으로 열지 않는다. 소스 수정으로 helper 경로가 바뀌면 재승인이 필요할 수 있다. 화면 캡처 권한은 사용하지 않는다.
+After the user grants permission to the identified subject, restart the server and verify access with status. The server does not open permission prompts automatically. Source changes that alter the helper path may require another approval. Screen capture permission is not used.
 
-이전 버전의 `desktop.lock` 파일 권한 때문에 시작이 거부되면 아래 명령으로 같은 파일의 권한만 수정한다. 실행 중인 서버가 있을 수 있으므로 파일을 삭제하거나 교체하지 않는다.
+If permissions on an older version's `desktop.lock` file prevent startup, use the following command to change permissions on that same file. Do not delete or replace it, because a server may still be running.
 
 ```bash
 chmod 600 ~/.local/state/computer-use-server/desktop.lock
@@ -72,49 +72,49 @@ chmod 600 ~/.local/state/computer-use-server/desktop.lock
 
 ## Linux
 
-Debian/Ubuntu에서는 배포판 Python과 pyatspi 패키지를 사용한다.
+On Debian/Ubuntu, use the distribution's Python and pyatspi package.
 
 ```bash
 sudo apt install python3-pyatspi
 /usr/bin/python3 "$SKILL_DIR/scripts/server.py"
 ```
 
-다른 배포판에서는 해당 배포판의 pyatspi2/AT-SPI Python 바인딩을 설치한다. 임의의 venv나 pyenv Python에서는 시스템 바인딩이 보이지 않을 수 있다. 서버가 실행한 Python으로 worker도 실행하므로 `import pyatspi`가 되는 동일 인터프리터를 선택한다.
+On other distributions, install their pyatspi2/AT-SPI Python bindings. An arbitrary venv or pyenv Python may not see the system bindings. The worker uses the same Python interpreter as the server, so select an interpreter where `import pyatspi` succeeds.
 
-로그인된 사용자의 그래픽 터미널에서 실행한다. DISPLAY 또는 WAYLAND_DISPLAY와 사용자 D-Bus 연결이 필요하다. headless 서버나 일반 SSH 세션에서 화면 상태를 만들어 내지 않는다. 앱이 AT-SPI를 노출하지 않거나 ACTIVE 창이 없거나 여러 개라면 `foreground_status`로 이유를 표시하고 조작을 거부한다. 앱 활성화는 유일하게 선택 가능한 focusable 창의 Component.grabFocus를 사용하며, Wayland compositor나 툴킷이 거절할 수 있다.
+Run from the logged-in user's graphical terminal. DISPLAY or WAYLAND_DISPLAY and a user D-Bus connection are required. Do not fabricate screen state on a headless server or an ordinary SSH session. If an app does not expose AT-SPI, or there is no ACTIVE window or more than one, `foreground_status` explains the condition and actions are rejected. App activation uses Component.grabFocus on a uniquely selectable, focusable window; the Wayland compositor or toolkit may reject it.
 
-## 에이전트별 세션과 차례
+## Per-agent sessions and turns
 
-서버 endpoint와 token-file 경로만 공유하고, session-file은 각각 따로 만든다. 아래 예시는 같은 쉘에서 두 에이전트 흐름을 보여준다.
+Share only the server endpoint and token-file path; give each agent its own session-file. The following example shows two agents' flows in one shell.
 
 ```bash
 RUN_DIR=$(mktemp -d)
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/a.json" open --agent-id agent-a
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/b.json" open --agent-id agent-b
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/a.json" enqueue \
-  --task-id a-task-1 --intent 'A의 입력과 결과 검증' --quantum-ms 1000 --ttl 30 --queue-timeout 60
+  --task-id a-task-1 --intent 'Enter and verify agent A input' --quantum-ms 1000 --ttl 30 --queue-timeout 60
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/b.json" enqueue \
-  --task-id b-task-1 --intent 'B의 입력과 결과 검증' --quantum-ms 1000 --ttl 30 --queue-timeout 60
+  --task-id b-task-1 --intent 'Enter and verify agent B input' --quantum-ms 1000 --ttl 30 --queue-timeout 60
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/a.json" turn --wait-seconds 10
 ```
 
-A가 running이면 새 status에서 대상을 찾고 안전한 작업묶음을 수행·검증한다. 예를 들어 같은 폼에 값을 입력하고 제출한 결과를 확인할 때까지는 양보하지 않는다. 여러 단계를 한 번에 전송하지 않으며 매 조작 후 새 상태를 확인한다. B는 status를 반복 조회하지 않고 turn으로 기다린다. `turn --wait-seconds`는 최대 30초까지만 기다리며 제한 시간 뒤 queued가 반환될 수 있으므로 running 여부를 확인한다.
+When A is running, it identifies targets from a fresh status, performs a safe work unit, and verifies the result. For example, when filling in and submitting one form, keep the turn until the submission result has been checked. Send each action separately and refresh state after it. B waits using turn instead of polling status. `turn --wait-seconds` accepts a polling budget of up to 30 seconds; this is not a strict wall-clock limit covering individual HTTP requests. The command can therefore take longer than the budget and may still return queued. Check that the returned state is running before acting.
 
-A에게 할 일이 더 남았고 현재 작업묶음을 마쳤다면 양보한다. 서버는 B에게 차례를 주고 A를 큐 끝으로 보낸다.
+If A has more work after finishing its current work unit, it yields. The server gives B a turn and places A at the end of the queue.
 
 ```bash
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/a.json" yield --requeue
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/b.json" turn --wait-seconds 10
 ```
 
-B도 running을 확인한 다음 **새 status → 조작 → 검증**을 수행한다. 아래 yield는 B가 작업을 마친 경우다.
+B also confirms running before following **fresh status → action → verification**. The yield below applies when B has finished its task.
 
 ```bash
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/b.json" yield
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/a.json" turn --wait-seconds 10
 ```
 
-A는 새 차례의 상태를 다시 읽어 남은 일을 판단한다. A의 작업까지 마친 뒤 정리한다.
+A reads the state again in its new turn before deciding how to finish the remaining work. Once A is also done, clean up.
 
 ```bash
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/a.json" yield
@@ -122,28 +122,26 @@ python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/a.json" close
 python3 "$SKILL_DIR/scripts/client.py" --session-file "$RUN_DIR/b.json" close
 ```
 
-클라이언트는 현재 task_id를 세션 파일에 보관하므로 turn/yield/cancel에는 task_id를 다시 쓰지 않는다. 대기 작업만 `cancel`할 수 있고 running 작업은 `yield`로 마친다. `yield --requeue`는 안전한 경계에서 나머지 작업을 계속할 때만 쓴다. quantum 기본 1초는 강제 중단 제한이 아니며 `yield_due`를 보고 현재 묶음이 끝나는 대로 양보한다. `renew --ttl 30`은 TTL만 연장하고 quantum을 다시 시작하지 않는다.
+The client keeps the current task_id in its session file, so turn/yield/cancel do not require it again. Only queued tasks can be cancelled with `cancel`; finish a running task with `yield`. Use `yield --requeue` only when continuing remaining work after reaching a safe boundary. The default one-second quantum is not a forced interruption deadline. Check `yield_due` and yield when the current work unit finishes. `renew --ttl 30` extends only the TTL and does not restart the quantum.
 
-yield 응답을 잃었으면 `retry-yield`로 이전 차례의 원래 요청을 재전송한 뒤 turn으로 현재 상태를 확인한다. 새 차례 토큰을 넣은 yield나 requeue 값을 바꾼 요청으로 대신하지 않는다. 작업/잠금이 만료되거나 동작 결과가 미확정이면 입력·제출 등을 자동 반복하지 않는다. status로 실제 결과를 조사한 뒤 새 작업으로 이어갈지 판단한다. 같은 task_id를 다시 enqueue해도 종료된 작업이 재실행되지는 않는다. 작업당 차례는 최대 256회이며 추가 requeue가 capacity로 거부되면 현재 차례에서 `yield`로 마칠 수 있다. HTTP 필드와 멱등성 규칙은 [API 명세](api.md)를 참고한다.
+If a yield response is lost, use `retry-yield` to resend the previous turn's original request, then use turn to check the current state. Do not substitute a yield with a new turn's token or a different requeue value. If a task or lease expires, or an action's outcome is unknown, do not automatically repeat input or submission. Inspect the actual result with status before deciding whether to continue as a new task. Enqueuing the same task_id does not restart a terminal task. Each task is limited to 256 turns; if another requeue is rejected with capacity, the current turn can still be finished with `yield`. See the [API reference](api.md) for HTTP fields and idempotency rules.
 
-단독 작업이나 기존 연동에는 `acquire --ttl 30` → 새 status → 조작·검증 → `release`를 계속 쓸 수 있다. 수동 lease가 끝나기 전에는 큐가 기다리므로 공정한 교대가 필요하면 모든 에이전트를 enqueue 흐름으로 맞춘다. 예약된 차례에서 release를 호출하면 scheduled_turn 오류가 발생한다.
+Single-agent work and existing integrations can continue using `acquire --ttl 30` → fresh status → actions and verification → `release`. The queue waits for a manual lease to end, so use enqueue for every participating agent when fair turn-taking is needed. Calling release during a scheduled turn returns a scheduled_turn error.
 
-기본 설정을 바꾸려면 모든 에이전트에 같은 `--endpoint`, `--token-file` 옵션을 전달한다. 클라이언트는 환경 변수 `CU_ENDPOINT`, `CU_TOKEN_FILE`, `CU_SESSION_FILE`도 지원한다. 세션 파일에는 인증정보와 마지막 조작 payload(입력한 텍스트 포함)가 들어간다. POSIX는 0600, Windows는 보호된 현재 사용자 전용 DACL로 만든다. close는 파일 내용을 비운다. 외부에 공유하거나 저장소에 커밋하지 않는다.
+To override defaults, give every agent the same `--endpoint` and `--token-file` options. The client also supports `CU_ENDPOINT`, `CU_TOKEN_FILE`, and `CU_SESSION_FILE`. Session files contain credentials and the last action payload, including any entered text. Files use mode 0600 on POSIX and a protected DACL allowing only the current user on Windows. Close clears the file's contents. Do not share these files externally or commit them to a repository.
 
-클라이언트는 마지막 snapshot/lease와 task_id를 보관한다. `act --action '<JSON>'`은 UUID를 자동 생성하고 요청을 저장한 후 전송한다. `retry`는 마지막 조작 요청을 그대로 다시 보낸다. transport 오류 후 다른 `act`를 차단한다. 만료된 세션은 새로운 파일로 open할 수 있지만 미확정 동작은 먼저 조사한다. 새 세션을 만들었다는 사실은 과거 작업 실패를 의미하지 않는다.
+The client retains the latest snapshot/lease and task_id. `act --action '<JSON>'` generates a UUID and saves the request before sending it. `retry` resends the last action request unchanged. After a transport error, the client blocks another `act`. An expired session can be replaced by opening a new file, but investigate any uncertain action outcome first. Creating a new session does not mean the previous work failed.
 
-## UI를 건드리지 않는 mock 실습
+## Mock exercise without UI changes
 
-실제 서버와 구별되는 포트와 token-file을 사용한다.
+Use a port and token-file distinct from the real server.
 
 ```bash
 python3 "$SKILL_DIR/scripts/server.py" --backend mock --port 8766 \
   --token-file /tmp/cu-demo-token
 ```
 
-다른 터미널에서:
-
-아래는 호환되는 수동 lease 흐름을 사용한다. 여러 에이전트의 교대는 위의 enqueue/turn/yield 예시를 사용한다.
+In another terminal, run the following manual-lease compatibility example. For agent turn-taking, use the enqueue/turn/yield flow above.
 
 ```bash
 RUN_DIR=$(mktemp -d)
@@ -163,15 +161,15 @@ python3 "$SKILL_DIR/scripts/client.py" close
 unset CU_ENDPOINT CU_TOKEN_FILE CU_SESSION_FILE
 ```
 
-`input.value`는 hello, `result.value`는 1이 된다. retry 후에도 버튼 실행 횟수는 늘어나지 않는다. mock의 고정 ID를 실제 앱에서 사용하지 않는다.
+`input.value` becomes hello and `result.value` becomes 1. Retry does not increment the button invocation count again. Do not reuse the mock's fixed IDs in real apps.
 
-## 개발 검증
+## Development validation
 
 ```bash
 python3 -m unittest discover -s "$SKILL_DIR/tests" -v
 python3 -m compileall -q "$SKILL_DIR/scripts"
 ```
 
-테스트는 fake/mock UI만 사용한다. 잠금 경쟁·순환 차례·만료·상태 변경·중복 요청·미확정 결과·HTTP 인증을 검증한다. 실제 native UI 조작 검증은 권한이 허용된 환경에서 별도로 수행해야 한다.
+Tests use only fake/mock UI. They cover lease contention, round-robin turns, expiry, state changes, duplicate requests, unknown outcomes, and HTTP authentication. Native UI actions must be validated separately in an environment where the required permissions are granted.
 
-공식 근거: [Apple Accessibility](https://developer.apple.com/documentation/applicationservices/1462085-axuielementcopyattributevalue), [Windows UIA 스레딩](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading), [uiautomation 2.0.29](https://pypi.org/project/uiautomation/2.0.29/), [GNOME pyatspi2](https://github.com/GNOME/pyatspi2), [AT-SPI grab_focus](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/method.Component.grab_focus.html).
+Official references: [Apple Accessibility](https://developer.apple.com/documentation/applicationservices/1462085-axuielementcopyattributevalue), [Windows UIA threading](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading), [uiautomation 2.0.29](https://pypi.org/project/uiautomation/2.0.29/), [GNOME pyatspi2](https://github.com/GNOME/pyatspi2), [AT-SPI grab_focus](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/method.Component.grab_focus.html).
