@@ -1,0 +1,4 @@
+interface:
+  display_name: "Computer Use Server"
+  short_description: "Shared desktop control using structured UI state"
+  default_prompt: "Use $computer-use-server to inspect the desktop state and coordinate UI actions across agents."
