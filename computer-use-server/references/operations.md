@@ -2,7 +2,7 @@
 
 ## Automatic OS selection
 
-Python 3.10 or later is required. Set `SKILL_DIR` to the absolute path of this skill. Reuse a server already started by another agent. The following examples use a macOS/Linux shell.
+Python 3.10 or later is required. Set `SKILL_DIR` to the absolute path of this skill. Reuse a server already started by another agent. The following quick start is for macOS; on Windows and Linux, use the venv setup and server commands in the platform sections below.
 
 ```bash
 SKILL_DIR=/absolute/path/to/computer-use-server
@@ -14,9 +14,9 @@ If health succeeds, do not run the second command. The server stays in the foreg
 
 | Host OS | Selected backend | Requirements | Observation scope |
 | --- | --- | --- | --- |
-| Windows | windows | `uiautomation==2.0.29`, a logged-in user desktop | Apps with visible top-level windows and the foreground window's UIA tree |
+| Windows | windows | `uiautomation==2.0.29` in a venv, a logged-in user desktop | Apps with visible top-level windows and the foreground window's UIA tree |
 | macOS | macos | Swift compiler, Accessibility permission | Regular GUI apps and the active app's AX tree |
-| Linux | linux | pyatspi2, AT-SPI, user D-Bus, and a graphical session | Accessibility apps and a uniquely identified active window |
+| Linux | linux | System-Python venv with distribution pyatspi2 bindings, AT-SPI, user D-Bus, and a graphical session | Accessibility apps and a uniquely identified active window |
 
 The default `--backend auto` maps the Windows/Darwin/Linux values from `platform.system()` to their corresponding backends. You can also specify `--backend windows`, `macos`, or `linux`; a mismatch with the host OS exits with `backend_os_mismatch`. Other operating systems exit with `unsupported_platform`. `--backend mock` works on every supported OS without loading native dependencies. Check the startup log and the `os` and `selected_backend` fields in `health` to confirm the selection. Health checks process availability; use status to verify actual UI access.
 
@@ -28,22 +28,28 @@ Default token-file locations:
 
 ## Windows
 
-Install the dependencies into the same Python environment from PowerShell.
+Create a skill-local venv with Python 3.10+ and install the Windows requirements into it from PowerShell. Reuse this venv on later runs; creation and installation are setup steps, not per-request operations. Call its Python directly so activation and PowerShell execution-policy changes are unnecessary.
 
 ```powershell
 $SkillDir = 'C:\path\to\computer-use-server'
-python -m pip install -r "$SkillDir\scripts\requirements-windows.txt"
-python "$SkillDir\scripts\server.py"
+python -m venv "$SkillDir\.venv"
+$SkillPython = Join-Path $SkillDir '.venv\Scripts\python.exe'
+& $SkillPython -m pip install -r "$SkillDir\scripts\requirements-windows.txt"
+& $SkillPython -c "import sys, uiautomation; assert sys.prefix != sys.base_prefix; print(sys.executable)"
+& $SkillPython "$SkillDir\scripts\client.py" health
+# Start only if no broker is running:
+& $SkillPython "$SkillDir\scripts\server.py"
 ```
 
 Open a separate PowerShell session and create a unique session for each agent.
 
 ```powershell
 $SkillDir = 'C:\path\to\computer-use-server'
+$SkillPython = Join-Path $SkillDir '.venv\Scripts\python.exe'
 $SessionFile = Join-Path $env:TEMP ('cu-' + [guid]::NewGuid().ToString() + '.json')
-python "$SkillDir\scripts\client.py" --session-file $SessionFile open --agent-id agent-a
-python "$SkillDir\scripts\client.py" --session-file $SessionFile enqueue --task-id agent-a-task-1 --intent 'Inspect and validate the target form'
-python "$SkillDir\scripts\client.py" --session-file $SessionFile turn --wait-seconds 10
+& $SkillPython "$SkillDir\scripts\client.py" --session-file $SessionFile open --agent-id agent-a
+& $SkillPython "$SkillDir\scripts\client.py" --session-file $SessionFile enqueue --task-id agent-a-task-1 --intent 'Inspect and validate the target form'
+& $SkillPython "$SkillDir\scripts\client.py" --session-file $SessionFile turn --wait-seconds 10
 ```
 
 When turn returns running, read status and choose the target and action. If it returns queued, continue waiting within a defined limit or do independent work.
@@ -78,14 +84,28 @@ chmod 600 ~/.local/state/computer-use-server/desktop.lock
 
 ## Linux
 
-On Debian/Ubuntu, use the distribution's Python and pyatspi package.
+On Debian/Ubuntu, install the distribution's venv support and pyatspi bindings, then create the skill's venv with `/usr/bin/python3 -m venv --system-site-packages`. This reuses the distribution's native AT-SPI/PyGObject integration without building another copy through pip.
 
 ```bash
-sudo apt install python3-pyatspi
-/usr/bin/python3 "$SKILL_DIR/scripts/server.py"
+SKILL_DIR=/absolute/path/to/computer-use-server
+sudo apt install python3-venv python3-pyatspi
+/usr/bin/python3 -m venv --system-site-packages "$SKILL_DIR/.venv"
+SKILL_PYTHON="$SKILL_DIR/.venv/bin/python"
+"$SKILL_PYTHON" -c 'import sys, pyatspi; assert sys.prefix != sys.base_prefix; print(sys.executable); print(pyatspi.__file__)'
+"$SKILL_PYTHON" "$SKILL_DIR/scripts/client.py" health
+# Start only if no broker is running:
+"$SKILL_PYTHON" "$SKILL_DIR/scripts/server.py"
 ```
 
-On other distributions, install their pyatspi2/AT-SPI Python bindings. An arbitrary venv or pyenv Python may not see the system bindings. The worker uses the same Python interpreter as the server, so select an interpreter where `import pyatspi` succeeds.
+Reuse the venv on later runs. `pyatspi` remains an OS-managed package; it is visible inside the venv, not installed into it by pip. `--system-site-packages` exposes other system Python packages too, so this is not full dependency isolation. Any additional pip installs for this skill must use `"$SKILL_PYTHON" -m pip`, without `sudo` or `--user`.
+
+On other distributions, install their pyatspi2/AT-SPI Python bindings and venv support, then create the venv from that distribution's Python with `--system-site-packages`. An arbitrary pyenv Python or a default isolated venv may not see the bindings. If the import check fails, verify the base interpreter and `include-system-site-packages = true` in `.venv/pyvenv.cfg`; do not copy native modules between Python installations. The worker uses the server's `sys.executable`, so starting the server with the venv Python also keeps its worker in that environment.
+
+The client uses only Python's standard library, so subsequent `python3 .../client.py` examples work without activation. For a consistent interpreter, substitute `"$SKILL_PYTHON"` in those examples. If the skill directory is read-only, create the venv in a user-writable location and use its Python path instead on either platform.
+
+The current Windows and Linux backends require these bindings to inspect accessibility trees and perform semantic actions. Removing the packages would require a replacement backend; `--backend mock` only simulates a desktop and is not a dependency-free live-control alternative. No additional Python packages are required for the macOS backend or for client-only use.
+
+References: [Python venv options and direct interpreter use](https://docs.python.org/3/library/venv.html), [Debian python3-pyatspi dependencies](https://packages.debian.org/trixie/python3-pyatspi).
 
 Run from the logged-in user's graphical terminal. DISPLAY or WAYLAND_DISPLAY and a user D-Bus connection are required. Do not fabricate screen state on a headless server or an ordinary SSH session. If an app does not expose AT-SPI, or there is no ACTIVE window or more than one, `foreground_status` explains the condition and actions are rejected. App activation uses Component.grabFocus on a uniquely selectable, focusable window; the Wayland compositor or toolkit may reject it.
 

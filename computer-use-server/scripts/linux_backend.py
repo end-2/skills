@@ -35,7 +35,7 @@ class LinuxBackend:
             try:
                 api = importlib.import_module("pyatspi")
             except (ImportError, ValueError) as exc:
-                raise BackendError("backend_unavailable", "pyatspi2 is unavailable. On Debian/Ubuntu install python3-pyatspi and use /usr/bin/python3.",
+                raise BackendError("backend_unavailable", "pyatspi2 is unavailable. On Debian/Ubuntu install python3-venv and python3-pyatspi, create a venv with /usr/bin/python3 -m venv --system-site-packages, and start the server with its Python; see references/operations.md#linux.",
                                    {"dependency": "python3-pyatspi"}) from exc
         self.api = api
         self.max_nodes, self.max_depth = max_nodes, max_depth

@@ -1,6 +1,7 @@
 """Windows UI Automation adapter, used only inside one dedicated worker thread.
 
-Optional Windows dependency: ``python -m pip install uiautomation==2.0.29``.
+Windows dependency: install ``uiautomation==2.0.29`` in the skill's venv.
+See references/operations.md#windows for setup and the server interpreter.
 Source/API reference: https://github.com/yinkaisheng/Python-UIAutomation-for-Windows
 The worker owns the COM apartment and all retained controls. Explicit native
 input uses SendInput without elevation or foreground-lock bypass. A hung native
@@ -140,8 +141,8 @@ class WindowsBackend:
             try:
                 self._auto = _automation or importlib.import_module("uiautomation")
             except ImportError as exc:
-                raise BackendError("backend_unavailable", "Windows UI Automation dependency is missing.",
-                                   {"install": "python -m pip install uiautomation==2.0.29",
+                raise BackendError("backend_unavailable", "Windows UI Automation dependency is missing. Install it in the skill's venv and start the server with that venv's Python; see references/operations.md#windows.",
+                                   {"install": '& $SkillPython -m pip install uiautomation==2.0.29',
                                     "dependency": "uiautomation"}) from exc
             # Balance this adapter-owned COM reference in close. comtypes owns
             # its separate import-time reference and releases it at process exit.

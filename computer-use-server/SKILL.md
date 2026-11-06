@@ -7,6 +7,8 @@ description: Control Windows, macOS, and Linux apps through structured accessibi
 
 Control a shared desktop through **observe → select → act → verify**. The Python 3.10+ server selects the host OS backend. Read the relevant platform section in the [operations guide](references/operations.md) for dependencies, desktop sessions, and permissions.
 
+On Windows and Linux, start the server with the skill's venv Python after the linked platform setup: [Windows](references/operations.md#windows) installs UI Automation into the venv; [Linux](references/operations.md#linux) uses a system-Python venv with access to distribution AT-SPI bindings. The client uses only the standard library and can run with any Python 3.10+. macOS needs no additional Python packages.
+
 `python scripts/server.py` defaults to `--backend auto`. Use `--backend mock` explicitly for tests that must not touch the desktop. Unsupported systems and missing dependencies fail instead of silently selecting mock.
 
 ## Connect and take turns
