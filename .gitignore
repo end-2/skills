@@ -42,6 +42,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+node_modules/
 
 # Native helper builds and temporary runtime output.
 .build/

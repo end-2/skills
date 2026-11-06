@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chrome Use Server"
+  short_description: "Share existing Chrome across coordinated AI agents"
+  default_prompt: "Use $chrome-use-server to inspect my existing Chrome tabs and coordinate browser actions across agents."
